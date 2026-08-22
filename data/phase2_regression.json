@@ -1,0 +1,29 @@
+{
+  "supported": [
+    {
+      "question": "Why is text splitting important for retrieval?",
+      "expected_source_fragment": "integrations/splitters/index.mdx"
+    },
+    {
+      "question": "How does Chroma store and search embedding vectors?",
+      "expected_source_fragment": "integrations/vectorstores/chroma.mdx"
+    },
+    {
+      "question": "How does agentic RAG decide when to retrieve information?",
+      "expected_source_fragment": "langgraph/agentic-rag.mdx"
+    },
+    {
+      "question": "How are Sentence Transformers used to create embeddings?",
+      "expected_source_fragment": "integrations/embeddings/sentence_transformers.mdx"
+    },
+    {
+      "question": "How does a cross-encoder rerank retrieved documents?",
+      "expected_source_fragment": "document_transformers/cross_encoder_reranker.mdx"
+    }
+  ],
+  "unsupported": [
+    "What is the capital city of Mars?",
+    "How do I bake a sourdough loaf?",
+    "What treatment should I take for a broken ankle?"
+  ]
+}

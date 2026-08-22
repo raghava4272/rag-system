@@ -21,9 +21,57 @@ from src.embed import (
     SentenceTransformerEmbeddingProvider,
 )
 from src.generate import GeneratedAnswer
+from src.hybrid_retrieve import HybridRetriever
 from src.llm import DEFAULT_GROQ_MODEL, GroqLanguageModel
 from src.pipeline import RAGPipeline
+from src.rerank import (
+    DEFAULT_MIN_RELEVANCE_SCORE,
+    DEFAULT_RERANK_CANDIDATE_K,
+    DEFAULT_RERANKER_MODEL,
+    CandidateReranker,
+    CrossEncoderReranker,
+    RerankingRetriever,
+)
 from src.retrieve import DEFAULT_TOP_K, SemanticRetriever
+from src.retrieve_bm25 import BM25Document, BM25Retriever
+
+
+def build_phase2_retriever(
+    *,
+    embedding_provider: SentenceTransformerEmbeddingProvider,
+    vector_store: ChromaVectorStore,
+    reranker_model: str = DEFAULT_RERANKER_MODEL,
+    candidate_k: int = DEFAULT_RERANK_CANDIDATE_K,
+    min_relevance_score: float = DEFAULT_MIN_RELEVANCE_SCORE,
+    reranker: CandidateReranker | None = None,
+) -> RerankingRetriever:
+    """Build the hybrid, reranked, confidence-filtered retrieval chain."""
+
+    semantic_retriever = SemanticRetriever(
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+    )
+    bm25_documents = [
+        BM25Document(
+            id=chunk.id,
+            text=chunk.text,
+            metadata=dict(chunk.metadata),
+        )
+        for chunk in vector_store.all_chunks()
+    ]
+    bm25_retriever = BM25Retriever(bm25_documents)
+    hybrid_retriever = HybridRetriever(
+        vector_retriever=semantic_retriever,
+        bm25_retriever=bm25_retriever,
+        candidate_k=candidate_k,
+    )
+    resolved_reranker = reranker or CrossEncoderReranker(reranker_model)
+    return RerankingRetriever(
+        hybrid_retriever=hybrid_retriever,
+        reranker=resolved_reranker,
+        candidate_k=candidate_k,
+        min_relevance_score=min_relevance_score,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +80,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("question", help="Question to answer from the indexed corpus")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
+    parser.add_argument(
+        "--candidate-k",
+        type=int,
+        default=DEFAULT_RERANK_CANDIDATE_K,
+        help=(
+            "Hybrid candidates to send to the reranker "
+            f"(default: {DEFAULT_RERANK_CANDIDATE_K})"
+        ),
+    )
+    parser.add_argument(
+        "--min-relevance-score",
+        type=float,
+        default=DEFAULT_MIN_RELEVANCE_SCORE,
+        help=(
+            "Minimum cross-encoder score required for evidence "
+            f"(default: {DEFAULT_MIN_RELEVANCE_SCORE})"
+        ),
+    )
     parser.add_argument(
         "--chroma-path",
         type=Path,
@@ -52,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--groq-model",
         default=os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL),
         help=f"Groq generation model (default: {DEFAULT_GROQ_MODEL})",
+    )
+    parser.add_argument(
+        "--reranker-model",
+        default=DEFAULT_RERANKER_MODEL,
+        help=f"Local cross-encoder model (default: {DEFAULT_RERANKER_MODEL})",
     )
     return parser
 
@@ -92,9 +163,12 @@ def main(argv: list[str] | None = None) -> int:
         path=args.chroma_path,
         collection_name=args.collection,
     )
-    retriever = SemanticRetriever(
+    retriever = build_phase2_retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
+        reranker_model=args.reranker_model,
+        candidate_k=args.candidate_k,
+        min_relevance_score=args.min_relevance_score,
     )
     pipeline = RAGPipeline(
         retriever=retriever,

@@ -49,6 +49,15 @@ class EmbeddedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredChunk:
+    """A persisted chunk loaded without its embedding vector."""
+
+    id: str
+    text: str
+    metadata: Metadata
+
+
+@dataclass(frozen=True, slots=True)
 class RetrievedChunk:
     """A nearest-neighbor result ordered by increasing vector distance."""
 
@@ -173,6 +182,35 @@ class ChromaVectorStore:
             documents=[record.text for record in records],
             metadatas=[record.metadata for record in records],
         )
+
+    def all_chunks(self) -> list[StoredChunk]:
+        """Load the persisted text corpus for non-vector retrieval strategies."""
+
+        response = self.collection.get(include=["documents", "metadatas"])
+        try:
+            ids = response.get("ids") or []
+            documents = response.get("documents") or []
+            metadatas = response.get("metadatas") or []
+        except (AttributeError, TypeError) as error:
+            raise ValueError("Chroma returned a malformed corpus response") from error
+
+        if not (len(ids) == len(documents) == len(metadatas)):
+            raise ValueError("Chroma returned malformed corpus columns")
+
+        chunks: list[StoredChunk] = []
+        for record_id, text, metadata in zip(ids, documents, metadatas):
+            if not isinstance(record_id, str) or not isinstance(text, str):
+                raise ValueError("Chroma returned malformed corpus data")
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError("Chroma returned malformed corpus metadata")
+            chunks.append(
+                StoredChunk(
+                    id=record_id,
+                    text=text,
+                    metadata=dict(metadata or {}),
+                )
+            )
+        return chunks
 
     def search(
         self,

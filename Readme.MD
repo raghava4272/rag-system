@@ -158,9 +158,177 @@ Suggested build order for an agentic coding session:
 8. Add a couple of tests for chunk size/overlap and for citation presence
    in the output.
 
-## Next Steps (Preview)
 
-- **Phase 2:** hybrid retrieval (BM25 + vector), cross-encoder re-ranking,
-  and enforced citation/decline-to-answer logic.
-- **Phase 3:** golden eval dataset (50–200 QA pairs), offline faithfulness
-  evaluation (Ragas), and CI pipeline gating on quality thresholds.
+## Phase 2: Production Quality
+
+### Overview
+
+Phase 2 upgrades the Phase 1 pipeline from "works on a demo" to "holds up
+under real queries." It combines keyword and semantic search, re-ranks the
+resulting candidates, and explicitly refuses to answer when the evidence is
+too weak.
+
+**Phase 2 goal:** replace naive top-k vector search with hybrid retrieval and
+re-ranking, then enforce traceable citation coverage — no supported context,
+no answer.
+
+### Scope — What Phase 2 Delivers
+
+- [x] BM25 keyword search alongside vector search
+- [x] Reciprocal Rank Fusion (RRF) of BM25 and vector rankings
+- [x] Local cross-encoder candidate re-ranking
+- [x] Configurable relevance threshold and decline-to-answer path
+- [x] Citation validation for every answer paragraph and list item
+- [x] Phase 1 regression checks and unsupported-query checks
+
+**Out of scope for Phase 2:** a large golden evaluation dataset, automated
+faithfulness scoring, and CI quality gates. Those belong to Phase 3.
+
+### Tech Stack Additions
+
+| Component      | Choice                                         |
+| -------------- | ---------------------------------------------- |
+| Keyword search | `rank-bm25` / Okapi BM25                       |
+| Fusion         | Reciprocal Rank Fusion with `k=60`             |
+| Re-ranking     | `cross-encoder/ms-marco-MiniLM-L6-v2` locally  |
+| Safety gate    | Sigmoid relevance threshold (`0.5` by default) |
+
+### Project Structure Additions
+
+```text
+rag-system/
+├── data/phase2_regression.json
+├── src/
+│   ├── retrieve_bm25.py
+│   ├── hybrid_retrieve.py
+│   ├── rerank.py
+│   ├── regression.py
+│   └── generate.py
+├── scripts/check_phase2.py
+└── tests/
+    ├── test_bm25_retrieval.py
+    ├── test_hybrid_retrieval.py
+    ├── test_rerank.py
+    ├── test_guarded_retrieval.py
+    ├── test_citation_guard.py
+    ├── test_phase2_wiring.py
+    └── test_phase2_regression.py
+```
+
+### Usage
+
+The original command now uses the complete Phase 2 retrieval path:
+
+```bash
+python scripts/ask.py "What does the document say about X?"
+```
+
+Optional tuning controls:
+
+```bash
+python scripts/ask.py "What does the document say about X?" \
+  --candidate-k 10 \
+  --top-k 5 \
+  --min-relevance-score 0.5
+```
+
+Run the local retrieval regression gate without calling Groq:
+
+```bash
+python scripts/check_phase2.py
+```
+
+### Regression Result
+
+Real-corpus check on 2026-08-22:
+
+| Metric                     | Phase 1 vector | Phase 2 |
+| -------------------------- | -------------- | ------- |
+| Hit@1                      | 80%            | 80%     |
+| Hit@3                      | 80%            | 100%    |
+| Unsupported decline rate   | —              | 100%    |
+| Supported-query regression | —              | None    |
+
+Phase 2 recovered the expected agentic-RAG source at rank 3 after vector-only
+retrieval missed it. All 84 automated tests pass.
+
+### Definition of Done (Phase 2)
+
+- [x] Hybrid retrieval returns fused BM25 and vector candidates.
+- [x] The cross-encoder improves measured top-3 relevance without regressions.
+- [x] Unsupported questions return an explicit decline without calling Groq.
+- [x] Every factual paragraph or list item contains a valid source citation.
+- [x] Phase 1 example queries still return correct, cited answers.
+
+Phase 3: CI/CD Integration
+Overview
+
+Phase 3 turns the pipeline into something you can trust to not silently regress. Instead of eyeballing a few example queries, you build a fixed "golden" test set, score every answer automatically for faithfulness, and fail the build if quality drops — the same way you'd gate on unit tests.
+
+Phase 3 goal: a golden QA dataset, an offline evaluation script that scores faithfulness (and ideally answer relevance/context precision), and a CI job that runs it on every pull request and fails below a threshold.
+
+Scope — What Phase 3 Delivers
+ A golden evaluation dataset of 50–200 manually verified question/expected-answer/expected-source triples
+ An offline evaluation script that runs the full pipeline against the golden set and scores faithfulness (and other relevant metrics) using Ragas
+ A defined quality threshold (e.g. minimum average faithfulness score)
+ A CI workflow that runs the eval script on every pull request
+ CI fails the build automatically if scores drop below threshold
+ A human-readable eval report (pass/fail per question, aggregate score) generated as a CI artifact
+
+Out of scope for Phase 3: anything beyond automated regression gating — this phase is about locking in the quality Phase 1 and 2 already built, not adding new retrieval/generation features.
+
+Tech Stack Additions
+Component	Choice
+Evaluation framework	Ragas (faithfulness, answer relevancy, context precision/recall)
+CI platform	GitHub Actions (or your existing CI provider)
+Dataset format	CSV or JSONL: question, ground_truth_answer, ground_truth_sources
+Project Structure Additions
+rag-system/
+├── eval/
+│   ├── golden_dataset.jsonl   # 50-200 manually verified QA pairs
+│   ├── run_eval.py            # runs pipeline against golden set, scores with Ragas
+│   └── report.py              # formats results into a readable report (CI artifact)
+├── .github/
+│   └── workflows/
+│       └── rag-eval.yml       # CI workflow: run_eval.py on every PR, fail below threshold
+Building the Golden Dataset
+Pull real or realistic questions covering your corpus's breadth — include easy factual lookups, multi-chunk synthesis questions, and a few questions the corpus deliberately can't answer (to test the decline-to-answer path from Phase 2).
+For each question, manually verify: the expected answer, and which source document(s)/chunk(s) should be cited.
+Start smaller (e.g. 50) and grow toward 200 as you find failure modes worth locking in as regression tests.
+
+Example record:
+
+json
+{
+  "question": "What retriever does LangChain's hybrid search combine with vector search?",
+  "ground_truth_answer": "BM25 keyword search.",
+  "ground_truth_sources": ["docs/retrieval/hybrid-search.md"]
+}
+Usage (Phase 3 additions)
+
+Run the evaluation locally:
+
+bash
+python eval/run_eval.py --dataset eval/golden_dataset.jsonl --threshold 0.8
+
+Expected output: per-question scores, an aggregate faithfulness score, and a non-zero exit code if the aggregate falls below --threshold — this exit code is what CI checks.
+
+Definition of Done (Phase 3)
+golden_dataset.jsonl contains at least 50 manually verified QA pairs covering a representative range of the corpus.
+run_eval.py runs the full Phase 1+2 pipeline against every golden question and computes Ragas faithfulness (plus any additional metrics you choose) per question and in aggregate.
+A quality threshold is defined and enforced — the script exits non-zero when the aggregate score falls below it.
+.github/workflows/rag-eval.yml runs run_eval.py on every pull request and the PR check fails automatically when the script exits non-zero.
+A report artifact (e.g. markdown or HTML summary) is generated so a reviewer can see which questions failed and why without re-running the eval locally.
+Notes for Building with Codex
+
+Suggested build order:
+
+Draft golden_dataset.jsonl with an initial ~50 questions — do this manually/carefully, since the whole phase's value depends on this data being genuinely correct, not generated and rubber-stamped.
+Implement run_eval.py: load the dataset, run each question through the Phase 1+2 pipeline (ask.py logic, called as a function rather than a CLI), collect the answer + retrieved contexts, and pass them to Ragas's faithfulness metric.
+Add threshold logic: compute the aggregate score, compare to --threshold, exit non-zero on failure.
+Implement report.py to turn per-question results into a readable summary (which questions passed/failed, scores, and the actual vs. expected answer for failures).
+Write .github/workflows/rag-eval.yml: trigger on pull_request, install dependencies, run run_eval.py, upload the report as a CI artifact, and let the script's exit code determine pass/fail.
+Test the gate deliberately: intentionally break something (e.g. lower top_k to 1) and confirm CI actually fails, then revert.
+Project Complete
+
+With Phase 3 done, the system ingests documents, retrieves with hybrid search and re-ranking, answers with enforced citations (or explicitly declines), and is protected by an automated regression gate in CI — a production-grade RAG pipeline end to end.

@@ -2,5 +2,6 @@ tiktoken
 pypdf
 sentence-transformers
 chromadb
+rank-bm25
 openai
 python-dotenv
