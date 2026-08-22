@@ -1,0 +1,110 @@
+"""Static safety and runtime contracts for the Docker image."""
+
+from __future__ import annotations
+
+import re
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DOCKERFILE = PROJECT_ROOT / "Dockerfile"
+DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
+LOCKFILE = PROJECT_ROOT / "requirements-linux.lock"
+
+
+class DockerContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        cls.dockerignore = {
+            line.strip()
+            for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+    def test_build_context_excludes_secrets_and_local_artifacts(self) -> None:
+        required_patterns = {
+            ".env",
+            ".git",
+            ".venv",
+            "__pycache__",
+            "*.py[cod]",
+            ".DS_Store",
+            "data/chroma",
+            "data/processed",
+            "eval/report.md",
+        }
+
+        self.assertTrue(required_patterns.issubset(self.dockerignore))
+        self.assertIn("!.env.example", self.dockerignore)
+
+    def test_uses_python_312_multistage_build(self) -> None:
+        self.assertRegex(
+            self.dockerfile,
+            r"(?m)^FROM python:3\.12-slim-bookworm AS dependencies$",
+        )
+        self.assertIn("FROM dependencies AS test", self.dockerfile)
+        self.assertIn("FROM dependencies AS runtime", self.dockerfile)
+        self.assertIn("python -m unittest discover -s tests -v", self.dockerfile)
+        self.assertIn("python -m pip check", self.dockerfile)
+
+    def test_test_stage_contains_every_contract_input(self) -> None:
+        test_stage = self.dockerfile.split(
+            "FROM dependencies AS test",
+            maxsplit=1,
+        )[1].split("FROM dependencies AS runtime", maxsplit=1)[0]
+
+        self.assertIn(
+            "COPY Dockerfile .dockerignore requirements-linux.lock ./",
+            test_stage,
+        )
+        self.assertIn("COPY .github ./.github", test_stage)
+
+    def test_installs_only_the_exact_linux_dependency_lock(self) -> None:
+        lock_text = LOCKFILE.read_text(encoding="utf-8")
+        lock_lines = [
+            line.strip()
+            for line in lock_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+        self.assertTrue(lock_lines)
+        self.assertTrue(
+            all("==" in line or line.startswith("--") for line in lock_lines),
+            "Every Linux runtime dependency must be pinned exactly",
+        )
+        self.assertIn("COPY requirements-linux.lock", self.dockerfile)
+        self.assertIn("-r requirements-linux.lock", self.dockerfile)
+        self.assertNotIn("-r requirements.txt", self.dockerfile)
+        self.assertIn("uv==0.12.1", self.dockerfile)
+        self.assertIn("--torch-backend cpu", self.dockerfile)
+
+        normalized_lock = lock_text.lower()
+        self.assertRegex(normalized_lock, r"(?m)^torch==[^\n]+\+cpu$")
+        self.assertNotRegex(
+            normalized_lock,
+            r"(?m)^(?:cuda-|nvidia-|triton==)",
+        )
+
+    def test_runtime_is_non_root_and_has_no_network_service(self) -> None:
+        runtime = self.dockerfile.split("FROM dependencies AS runtime", maxsplit=1)[1]
+
+        self.assertIn("USER rag", runtime)
+        self.assertNotIn("EXPOSE", runtime)
+        self.assertIn(
+            'ENTRYPOINT ["python", "scripts/container.py"]',
+            runtime,
+        )
+        self.assertIn('CMD ["--help"]', runtime)
+
+    def test_groq_secret_is_never_baked_into_the_image(self) -> None:
+        self.assertNotRegex(
+            self.dockerfile,
+            re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+GROQ_API_KEY\b"),
+        )
+        self.assertNotIn("COPY .env", self.dockerfile)
+
+
+if __name__ == "__main__":
+    unittest.main()
