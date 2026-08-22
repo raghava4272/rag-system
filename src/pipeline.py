@@ -30,6 +30,14 @@ class IndexBuildResult:
     indexed_chunk_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class RAGRun:
+    """One answer together with the evidence retrieved to produce it."""
+
+    answer: GeneratedAnswer
+    retrieved_chunks: tuple[RetrievedChunk, ...]
+
+
 def build_index(
     source_directory: str | Path,
     *,
@@ -70,9 +78,20 @@ class RAGPipeline:
         *,
         top_k: int = DEFAULT_TOP_K,
     ) -> GeneratedAnswer:
-        chunks = self.retriever.retrieve(question, top_k=top_k)
-        return generate_answer(
+        return self.run(question, top_k=top_k).answer
+
+    def run(
+        self,
+        question: str,
+        *,
+        top_k: int = DEFAULT_TOP_K,
+    ) -> RAGRun:
+        """Retrieve and answer while preserving contexts for evaluation."""
+
+        chunks = tuple(self.retriever.retrieve(question, top_k=top_k))
+        answer = generate_answer(
             question,
             list(chunks),
             language_model=self.language_model,
         )
+        return RAGRun(answer=answer, retrieved_chunks=chunks)
