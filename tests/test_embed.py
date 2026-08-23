@@ -50,9 +50,13 @@ class FakeVectorStore:
 class FakeCollection:
     def __init__(self) -> None:
         self.payload: dict[str, object] | None = None
+        self.deleted_ids: list[str] | None = None
 
     def upsert(self, **payload: object) -> None:
         self.payload = payload
+
+    def delete(self, *, ids: list[str]) -> None:
+        self.deleted_ids = ids
 
 
 class FakeChromaClient:
@@ -211,6 +215,14 @@ class AdapterTests(unittest.TestCase):
             client.collection.payload["metadatas"],
             [records[0].metadata],
         )
+
+    def test_chroma_delete_uses_an_explicit_id_list(self) -> None:
+        client = FakeChromaClient()
+        store = ChromaVectorStore(client=client, collection_name="rag_documents")
+
+        store.delete(["chunk-1", "chunk-2"])
+
+        self.assertEqual(client.collection.deleted_ids, ["chunk-1", "chunk-2"])
 
     def test_sentence_transformer_uses_retrieval_specific_normalized_encoding(self) -> None:
         model = FakeSentenceTransformer()

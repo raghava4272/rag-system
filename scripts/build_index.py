@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -20,7 +21,15 @@ from src.embed import (
     ChromaVectorStore,
     SentenceTransformerEmbeddingProvider,
 )
+from src.index_manifest import default_manifest_path
 from src.pipeline import build_index
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--overlap", type=int, default=DEFAULT_OVERLAP)
+    parser.add_argument(
+        "--lock-timeout-seconds",
+        type=nonnegative_float,
+        default=0.0,
+        help=(
+            "Seconds to wait for another index writer to finish; "
+            "0 fails immediately (default: 0)"
+        ),
+    )
     return parser
 
 
@@ -68,15 +86,21 @@ def main(argv: list[str] | None = None) -> int:
         vector_store=vector_store,
         chunk_size=args.chunk_size,
         overlap=args.overlap,
+        manifest_path=default_manifest_path(args.chroma_path, args.collection),
+        embedding_model=args.embedding_model,
+        lock_timeout_seconds=args.lock_timeout_seconds,
     )
     print(
-        f"Indexed {result.indexed_chunk_count} chunks from "
+        f"Embedded {result.indexed_chunk_count} chunks from "
+        f"{result.changed_source_file_count} changed source files; "
+        f"reused {result.unchanged_source_file_count} unchanged source files; "
+        f"removed {result.removed_source_file_count} deleted source files. "
+        f"Index contains {result.total_chunk_count} total chunks from "
         f"{result.raw_document_count} document records across "
-        f"{result.source_file_count} source files."
+        f"{result.source_file_count} current source files."
     )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

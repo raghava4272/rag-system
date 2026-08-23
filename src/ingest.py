@@ -94,16 +94,15 @@ def load_document(
     )
 
 
-def load_documents(source_directory: str | Path) -> list[RawDocument]:
-    """Recursively load supported files from a directory in stable order."""
-
+def discover_source_files(source_directory: str | Path) -> list[Path]:
+    """Return supported source files recursively in stable relative-path order."""
     directory = Path(source_directory)
     if not directory.exists():
         raise FileNotFoundError(directory)
     if not directory.is_dir():
         raise NotADirectoryError(directory)
 
-    paths = sorted(
+    return sorted(
         (
             path
             for path in directory.rglob("*")
@@ -112,8 +111,11 @@ def load_documents(source_directory: str | Path) -> list[RawDocument]:
         key=lambda path: path.relative_to(directory).as_posix().casefold(),
     )
 
+
+def load_documents(source_directory: str | Path) -> list[RawDocument]:
+    """Recursively load supported files from a directory in stable order."""
+
     documents: list[RawDocument] = []
-    for path in paths:
+    for path in discover_source_files(source_directory):
         documents.extend(load_document(path))
     return documents
-

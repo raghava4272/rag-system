@@ -37,6 +37,10 @@ class EmbeddingProvider(Protocol):
 class VectorStore(Protocol):
     def upsert(self, records: Sequence[EmbeddedChunk]) -> None: ...
 
+    def delete(self, record_ids: Sequence[str]) -> None: ...
+
+    def all_chunks(self) -> list[StoredChunk]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class EmbeddedChunk:
@@ -182,6 +186,11 @@ class ChromaVectorStore:
             documents=[record.text for record in records],
             metadatas=[record.metadata for record in records],
         )
+
+    def delete(self, record_ids: Sequence[str]) -> None:
+        ids = list(record_ids)
+        if ids:
+            self.collection.delete(ids=ids)
 
     def all_chunks(self) -> list[StoredChunk]:
         """Load the persisted text corpus for non-vector retrieval strategies."""

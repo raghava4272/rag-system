@@ -348,6 +348,24 @@ Build or update the index from the host's read-only `data/raw/` directory:
 docker compose run --rm index
 ```
 
+Indexing is incremental. A collection-specific manifest is stored beside
+Chroma in the `rag-chroma` volume. Unchanged source files reuse their existing
+chunks, changed or missing sources are re-embedded, deleted sources are removed,
+and changes to the embedding model or chunking configuration trigger a safe
+full rebuild.
+
+Only one process may update a collection at a time. The index command holds a
+collection-specific operating-system lock for the complete Chroma-and-manifest
+transaction. A competing command fails immediately with a clear error instead
+of racing the active writer; optionally make it wait for up to 30 seconds:
+
+```bash
+docker compose run --rm index --lock-timeout-seconds 30
+```
+
+The `.lock` file is only a rendezvous point. A crash automatically releases its
+kernel-held lock, so an old file does not block future indexing.
+
 Ask a question using the same persistent index:
 
 ```bash
@@ -370,6 +388,36 @@ The Dockerfile selects `requirements-linux-amd64.lock` or
 `requirements-linux-arm64.lock` from BuildKit's target architecture. Compose
 does not force a platform, so it builds and runs natively on both Intel/AMD
 Linux and ARM64 machines such as Apple Silicon.
+
+## Container Image CI
+
+`.github/workflows/container-image.yml` verifies every pull request on native
+AMD64 and ARM64 runners by building the dependency-locked Docker test target,
+building the runtime image, and scanning it for high and critical
+vulnerabilities. A JSON report for each architecture is retained as a workflow
+artifact. Fixable high or critical findings fail the check; all findings remain
+visible in the reports.
+
+After the same verification succeeds on a trusted push to `main` or a `v*`
+release tag, GitHub Actions publishes a native `linux/amd64` + `linux/arm64`
+image to `ghcr.io/raghava4272/rag-system`. Every publication receives an
+immutable full-commit tag (`sha-<commit>`). Main also updates `main` and
+`latest`; version tags such as `v1.2.3` produce `1.2.3`, `1.2`, and `latest`.
+
+Published images include BuildKit provenance and an SBOM, and the published
+manifest digest receives a GitHub build-provenance attestation. Publishing uses
+the repository-scoped `GITHUB_TOKEN`; no registry password or Groq key is
+required. GitHub Actions and the Docker base image are checked weekly by
+Dependabot while workflow actions remain pinned to immutable commit SHAs.
+
+Pull a public package after the first successful `main` build:
+
+```bash
+docker pull ghcr.io/raghava4272/rag-system:latest
+```
+
+If the package is private, authenticate to GHCR or change its visibility in the
+repository's Packages settings before pulling it anonymously.
 
 To inspect the persistent resources:
 
