@@ -332,3 +332,50 @@ Test the gate deliberately: intentionally break something (e.g. lower top_k to 1
 Project Complete
 
 With Phase 3 done, the system ingests documents, retrieves with hybrid search and re-ranking, answers with enforced citations (or explicitly declines), and is protected by an automated regression gate in CI — a production-grade RAG pipeline end to end.
+
+## Docker Compose Workflow
+
+The application runs as one-shot container jobs; it does not need a web UI or
+long-running server. Build the runtime image once:
+
+```bash
+docker compose build
+```
+
+Build or update the index from the host's read-only `data/raw/` directory:
+
+```bash
+docker compose run --rm index
+```
+
+Ask a question using the same persistent index:
+
+```bash
+docker compose run --rm ask "What is reciprocal rank fusion?"
+```
+
+Run the Phase 3 quality gate and print its persisted report:
+
+```bash
+docker compose run --rm evaluate
+docker compose run --rm report
+```
+
+Compose reads `GROQ_API_KEY` and `GROQ_MODEL` from the local `.env` file and
+injects them only into the jobs that call Groq. It never adds the key to the
+image. Named volumes persist the Chroma index, downloaded model cache, and
+evaluation report across disposable containers.
+
+The Dockerfile selects `requirements-linux-amd64.lock` or
+`requirements-linux-arm64.lock` from BuildKit's target architecture. Compose
+does not force a platform, so it builds and runs natively on both Intel/AMD
+Linux and ARM64 machines such as Apple Silicon.
+
+To inspect the persistent resources:
+
+```bash
+docker volume ls --filter label=com.docker.compose.project=rag-system
+```
+
+Deleting the `rag-system_rag-chroma` volume deletes the built index, so do not
+remove Compose volumes unless you intend to rebuild it.

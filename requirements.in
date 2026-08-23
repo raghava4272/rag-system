@@ -1,7 +1,10 @@
-# Direct runtime dependencies. Compile this file for the Linux container with:
-# uv pip compile requirements.in --python-platform linux --python-version 3.12 \
-#   --torch-backend cpu --emit-index-url \
-#   --output-file requirements-linux.lock
+# Direct runtime dependencies. Compile one CPU-only lock per Linux architecture:
+# uv pip compile requirements.in --python-platform x86_64-unknown-linux-gnu \
+#   --python-version 3.12 --torch-backend cpu --emit-index-url \
+#   --output-file requirements-linux-amd64.lock
+# uv pip compile requirements.in --python-platform aarch64-unknown-linux-gnu \
+#   --python-version 3.12 --torch-backend cpu --emit-index-url \
+#   --output-file requirements-linux-arm64.lock
 tiktoken
 pypdf
 sentence-transformers

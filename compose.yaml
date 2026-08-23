@@ -1,0 +1,54 @@
+name: rag-system
+
+x-rag-job: &rag-job
+  image: rag-system:local
+  working_dir: /app
+  init: true
+  read_only: true
+  restart: "no"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=1g,uid=10001,gid=10001
+  volumes:
+    - ./data/raw:/app/data/raw:ro
+    - rag-chroma:/app/data/chroma
+    - rag-cache:/home/rag/.cache
+    - rag-artifacts:/app/artifacts
+
+services:
+  index:
+    <<: *rag-job
+    build:
+      context: .
+      target: runtime
+    entrypoint: ["python", "scripts/container.py", "index"]
+    command: []
+
+  ask:
+    <<: *rag-job
+    entrypoint: ["python", "scripts/container.py", "ask"]
+    command: ["--help"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+
+  evaluate:
+    <<: *rag-job
+    entrypoint: ["python", "scripts/container.py", "evaluate", "--report", "/app/artifacts/eval-report.md"]
+    command: []
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+
+  report:
+    <<: *rag-job
+    entrypoint: ["cat", "/app/artifacts/eval-report.md"]
+    command: []
+
+volumes:
+  rag-chroma:
+  rag-cache:
+  rag-artifacts:

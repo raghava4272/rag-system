@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import io
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.container import main
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONTAINER_SCRIPT = PROJECT_ROOT / "scripts" / "container.py"
 
 
 class ContainerCommandTests(unittest.TestCase):
@@ -47,6 +55,21 @@ class ContainerCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("Unknown command: serve", error.getvalue())
+
+    def test_real_dispatcher_imports_project_packages_from_any_working_directory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as outside_project:
+            result = subprocess.run(
+                [sys.executable, str(CONTAINER_SCRIPT), "ask", "--help"],
+                cwd=outside_project,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Question to answer from the indexed corpus", result.stdout)
 
 
 if __name__ == "__main__":

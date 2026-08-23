@@ -10,7 +10,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = PROJECT_ROOT / "Dockerfile"
 DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
-LOCKFILE = PROJECT_ROOT / "requirements-linux.lock"
+LOCKFILES = {
+    "amd64": PROJECT_ROOT / "requirements-linux-amd64.lock",
+    "arm64": PROJECT_ROOT / "requirements-linux-arm64.lock",
+}
 
 
 class DockerContractTests(unittest.TestCase):
@@ -56,36 +59,42 @@ class DockerContractTests(unittest.TestCase):
         )[1].split("FROM dependencies AS runtime", maxsplit=1)[0]
 
         self.assertIn(
-            "COPY Dockerfile .dockerignore requirements-linux.lock ./",
+            "COPY Dockerfile .dockerignore compose.yaml requirements-linux-*.lock ./",
             test_stage,
         )
         self.assertIn("COPY .github ./.github", test_stage)
 
-    def test_installs_only_the_exact_linux_dependency_lock(self) -> None:
-        lock_text = LOCKFILE.read_text(encoding="utf-8")
-        lock_lines = [
-            line.strip()
-            for line in lock_text.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
+    def test_selects_an_exact_cpu_lock_for_each_target_architecture(self) -> None:
+        for architecture, lockfile in LOCKFILES.items():
+            with self.subTest(architecture=architecture):
+                lock_text = lockfile.read_text(encoding="utf-8")
+                lock_lines = [
+                    line.strip()
+                    for line in lock_text.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
 
-        self.assertTrue(lock_lines)
-        self.assertTrue(
-            all("==" in line or line.startswith("--") for line in lock_lines),
-            "Every Linux runtime dependency must be pinned exactly",
+                self.assertTrue(lock_lines)
+                self.assertTrue(
+                    all("==" in line or line.startswith("--") for line in lock_lines),
+                    "Every Linux runtime dependency must be pinned exactly",
+                )
+                normalized_lock = lock_text.lower()
+                self.assertRegex(normalized_lock, r"(?m)^torch==[^\n]+\+cpu$")
+                self.assertNotRegex(
+                    normalized_lock,
+                    r"(?m)^(?:cuda-|nvidia-|triton==)",
+                )
+
+        self.assertIn("ARG TARGETARCH", self.dockerfile)
+        self.assertIn(
+            "COPY requirements-linux-${TARGETARCH}.lock ./requirements-linux.lock",
+            self.dockerfile,
         )
-        self.assertIn("COPY requirements-linux.lock", self.dockerfile)
         self.assertIn("-r requirements-linux.lock", self.dockerfile)
         self.assertNotIn("-r requirements.txt", self.dockerfile)
         self.assertIn("uv==0.12.1", self.dockerfile)
         self.assertIn("--torch-backend cpu", self.dockerfile)
-
-        normalized_lock = lock_text.lower()
-        self.assertRegex(normalized_lock, r"(?m)^torch==[^\n]+\+cpu$")
-        self.assertNotRegex(
-            normalized_lock,
-            r"(?m)^(?:cuda-|nvidia-|triton==)",
-        )
 
     def test_runtime_is_non_root_and_has_no_network_service(self) -> None:
         runtime = self.dockerfile.split("FROM dependencies AS runtime", maxsplit=1)[1]
