@@ -35,6 +35,23 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
 
+  api:
+    <<: *rag-job
+    entrypoint: ["python", "-m", "uvicorn", "src.api:app"]
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
   evaluate:
     <<: *rag-job
     entrypoint: ["python", "scripts/container.py", "evaluate", "--report", "/app/artifacts/eval-report.md"]

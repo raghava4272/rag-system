@@ -38,6 +38,17 @@ class ComposeContractTests(unittest.TestCase):
             self.compose,
         )
 
+    def test_defines_a_health_checked_long_running_api(self) -> None:
+        self.assertRegex(self.compose, r"(?m)^  api:$")
+        self.assertIn(
+            'entrypoint: ["python", "-m", "uvicorn", "src.api:app"]',
+            self.compose,
+        )
+        self.assertIn('command: ["--host", "0.0.0.0", "--port", "8000"]', self.compose)
+        self.assertIn('- "8000:8000"', self.compose)
+        self.assertIn("healthcheck:", self.compose)
+        self.assertIn("restart: unless-stopped", self.compose)
+
     def test_builds_the_shared_runtime_image_once(self) -> None:
         self.assertEqual(self.compose.count("  build:\n"), 1)
         index_service = self.compose.split("  index:\n", maxsplit=1)[1].split(

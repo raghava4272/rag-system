@@ -10,6 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = PROJECT_ROOT / "Dockerfile"
 DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
+REQUIREMENTS_IN = PROJECT_ROOT / "requirements.in"
 LOCKFILES = {
     "amd64": PROJECT_ROOT / "requirements-linux-amd64.lock",
     "arm64": PROJECT_ROOT / "requirements-linux-arm64.lock",
@@ -96,16 +97,26 @@ class DockerContractTests(unittest.TestCase):
         self.assertIn("uv==0.12.1", self.dockerfile)
         self.assertIn("--torch-backend cpu", self.dockerfile)
 
-    def test_runtime_is_non_root_and_has_no_network_service(self) -> None:
+    def test_runtime_is_non_root_and_keeps_the_safe_default_command(self) -> None:
         runtime = self.dockerfile.split("FROM dependencies AS runtime", maxsplit=1)[1]
 
         self.assertIn("USER rag", runtime)
-        self.assertNotIn("EXPOSE", runtime)
         self.assertIn(
             'ENTRYPOINT ["python", "scripts/container.py"]',
             runtime,
         )
         self.assertIn('CMD ["--help"]', runtime)
+
+    def test_api_runtime_dependencies_are_declared_and_locked(self) -> None:
+        direct_requirements = REQUIREMENTS_IN.read_text(encoding="utf-8")
+        self.assertRegex(direct_requirements, r"(?m)^fastapi\b")
+        self.assertRegex(direct_requirements, r"(?m)^uvicorn\b")
+
+        for architecture, lockfile in LOCKFILES.items():
+            with self.subTest(architecture=architecture):
+                lock_text = lockfile.read_text(encoding="utf-8")
+                self.assertRegex(lock_text, r"(?m)^fastapi==[^\n]+$")
+                self.assertRegex(lock_text, r"(?m)^uvicorn==[^\n]+$")
 
     def test_groq_secret_is_never_baked_into_the_image(self) -> None:
         self.assertNotRegex(

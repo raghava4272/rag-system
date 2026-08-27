@@ -333,6 +333,57 @@ Project Complete
 
 With Phase 3 done, the system ingests documents, retrieves with hybrid search and re-ranking, answers with enforced citations (or explicitly declines), and is protected by an automated regression gate in CI — a production-grade RAG pipeline end to end.
 
+## Phase 4: API Foundation
+
+Phase 4 puts a typed HTTP boundary in front of the existing deterministic RAG
+pipeline. It does not make retrieval agentic yet. The API gives later phases a
+stable place to add authentication, sessions, permissions, streaming, rate
+limits, and finally agent decisions without coupling those concerns to the CLI.
+
+### Scope
+
+- [x] `POST /v1/query` with validated question and `top_k` fields
+- [x] Structured answer, abstention flag, and citation objects
+- [x] Separate liveness and readiness endpoints
+- [x] One pipeline initialization per server lifetime
+- [x] Safe `503` responses that do not expose provider or configuration details
+- [x] Interactive OpenAPI documentation at `/docs`
+- [x] A non-root, read-only, health-checked Docker Compose API service
+- [x] Exact AMD64 and ARM64 dependency locks for FastAPI and Uvicorn
+
+Authentication and agent tool selection are deliberately not part of this
+phase. Until those are added, do not expose the API directly to the public
+internet.
+
+### Run the API with Docker
+
+Build the index before starting the server:
+
+```bash
+docker compose build
+docker compose run --rm index
+docker compose up api
+```
+
+Check whether the process is alive and whether its RAG dependencies initialized:
+
+```bash
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+```
+
+Ask a question:
+
+```bash
+curl -X POST http://localhost:8000/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What is reciprocal rank fusion?","top_k":5}'
+```
+
+Open `http://localhost:8000/docs` to try the same contract interactively. If
+the Groq key or another startup dependency is unavailable, liveness remains
+healthy while readiness and query requests return `503`.
+
 ## Docker Compose Workflow
 
 The application runs as one-shot container jobs; it does not need a web UI or
