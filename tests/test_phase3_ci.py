@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -33,7 +34,10 @@ class Phase3CIWorkflowTests(unittest.TestCase):
         self.assertIn("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}", self.workflow)
 
     def test_always_uploads_the_markdown_report(self) -> None:
-        self.assertIn("uses: actions/upload-artifact@v7", self.workflow)
+        self.assertRegex(
+            self.workflow,
+            r"uses: actions/upload-artifact@[0-9a-f]{40}",
+        )
         self.assertIn("if: ${{ always() }}", self.workflow)
         self.assertIn("name: rag-evaluation-report", self.workflow)
         self.assertIn("path: artifacts/rag-evaluation.md", self.workflow)
@@ -48,6 +52,17 @@ class Phase3CIWorkflowTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", evaluation_step)
         self.assertNotIn("|| true", evaluation_step)
         self.assertNotIn("exit 0", evaluation_step)
+
+    def test_every_external_action_is_pinned_to_an_immutable_commit(self) -> None:
+        uses = re.findall(
+            r"^\s*uses:\s*([^\s#]+)",
+            self.workflow,
+            flags=re.MULTILINE,
+        )
+        self.assertGreaterEqual(len(uses), 3)
+        for action in uses:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":
