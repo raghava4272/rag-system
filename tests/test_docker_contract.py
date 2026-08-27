@@ -60,7 +60,8 @@ class DockerContractTests(unittest.TestCase):
         )[1].split("FROM dependencies AS runtime", maxsplit=1)[0]
 
         self.assertIn(
-            "COPY Dockerfile .dockerignore compose.yaml requirements-linux-*.lock ./",
+            "COPY Dockerfile .dockerignore compose.yaml requirements.in "
+            "requirements-linux-*.lock ./",
             test_stage,
         )
         self.assertIn("COPY .github ./.github", test_stage)

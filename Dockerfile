@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM dependencies AS test
 
-COPY Dockerfile .dockerignore compose.yaml requirements-linux-*.lock ./
+COPY Dockerfile .dockerignore compose.yaml requirements.in requirements-linux-*.lock ./
 COPY .github ./.github
 COPY src ./src
 COPY scripts ./scripts
