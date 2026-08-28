@@ -8,13 +8,16 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Header, Request, Response, Security, status
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from scripts.ask import build_phase2_retriever
+from src.auth import APIKeyAuthenticator
 from src.embed import (
     DEFAULT_CHROMA_PATH,
     DEFAULT_COLLECTION_NAME,
@@ -48,6 +51,13 @@ class AnswerPipeline(Protocol):
 PipelineFactory = Callable[[], AnswerPipeline]
 
 
+class Authenticator(Protocol):
+    def authenticate(self, api_key: str) -> str | None: ...
+
+
+AuthenticatorFactory = Callable[[], Authenticator]
+
+
 class QueryRequest(BaseModel):
     """Validated client input for one grounded question."""
 
@@ -68,6 +78,8 @@ class CitationResponse(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     abstained: bool
+    user_id: str
+    session_id: str
     citations: list[CitationResponse]
 
 
@@ -117,9 +129,24 @@ def build_default_pipeline() -> RAGPipeline:
     )
 
 
+def build_default_authenticator() -> APIKeyAuthenticator:
+    """Load hashed API-key identities from the runtime environment."""
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError(
+            "The API requires python-dotenv. Install the locked dependencies."
+        ) from error
+
+    load_dotenv(PROJECT_ROOT / ".env")
+    return APIKeyAuthenticator.from_environment()
+
+
 def _safe_unavailable_response() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Cache-Control": "no-store"},
         content={
             "error": {
                 "code": "rag_unavailable",
@@ -129,10 +156,33 @@ def _safe_unavailable_response() -> JSONResponse:
     )
 
 
-def _query_response(answer: GeneratedAnswer) -> QueryResponse:
+def _unauthorized_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        headers={
+            "Cache-Control": "no-store",
+            "WWW-Authenticate": "Bearer",
+        },
+        content={
+            "error": {
+                "code": "unauthorized",
+                "message": "Valid bearer authentication is required.",
+            }
+        },
+    )
+
+
+def _query_response(
+    answer: GeneratedAnswer,
+    *,
+    user_id: str,
+    session_id: UUID,
+) -> QueryResponse:
     return QueryResponse(
         answer=answer.text,
         abstained=not answer.citations,
+        user_id=user_id,
+        session_id=str(session_id),
         citations=[
             CitationResponse(
                 number=citation.number,
@@ -150,12 +200,15 @@ def create_app(
     *,
     pipeline: AnswerPipeline | None = None,
     pipeline_factory: PipelineFactory = build_default_pipeline,
+    authenticator: Authenticator | None = None,
+    authenticator_factory: AuthenticatorFactory = build_default_authenticator,
 ) -> FastAPI:
     """Build an application with an injectable pipeline for deterministic tests."""
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.pipeline = pipeline
+        application.state.authenticator = authenticator
         if application.state.pipeline is None:
             try:
                 application.state.pipeline = await run_in_threadpool(
@@ -167,11 +220,22 @@ def create_app(
                     "RAG pipeline initialization failed (type=%s)",
                     type(error).__name__,
                 )
+        if application.state.authenticator is None:
+            try:
+                application.state.authenticator = await run_in_threadpool(
+                    authenticator_factory
+                )
+            except Exception as error:
+                application.state.authenticator = None
+                LOGGER.error(
+                    "API authentication initialization failed (type=%s)",
+                    type(error).__name__,
+                )
         yield
 
     application = FastAPI(
         title="RAG System API",
-        version="4.0.0",
+        version="5.0.0",
         lifespan=lifespan,
         redoc_url=None,
     )
@@ -191,26 +255,49 @@ def create_app(
         tags=["health"],
     )
     async def readiness(request: Request) -> HealthResponse | JSONResponse:
-        if request.app.state.pipeline is None:
+        if (
+            request.app.state.pipeline is None
+            or request.app.state.authenticator is None
+        ):
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={"status": "not_ready"},
             )
         return HealthResponse(status="ready")
 
+    bearer_scheme = HTTPBearer(auto_error=False)
+
     @application.post(
         "/v1/query",
         response_model=QueryResponse,
-        responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse}},
+        responses={
+            status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+        },
         tags=["rag"],
     )
     async def query(
         payload: QueryRequest,
         request: Request,
+        response: Response,
+        credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+        requested_session_id: UUID | None = Header(
+            default=None,
+            alias="X-Session-ID",
+        ),
     ) -> QueryResponse | JSONResponse:
         resolved_pipeline = request.app.state.pipeline
-        if resolved_pipeline is None:
+        resolved_authenticator = request.app.state.authenticator
+        if resolved_pipeline is None or resolved_authenticator is None:
             return _safe_unavailable_response()
+
+        user_id = None
+        if credentials is not None:
+            user_id = resolved_authenticator.authenticate(credentials.credentials)
+        if user_id is None:
+            return _unauthorized_response()
+
+        resolved_session_id = requested_session_id or uuid4()
         try:
             answer = await run_in_threadpool(
                 resolved_pipeline.ask,
@@ -223,7 +310,13 @@ def create_app(
                 type(error).__name__,
             )
             return _safe_unavailable_response()
-        return _query_response(answer)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Session-ID"] = str(resolved_session_id)
+        return _query_response(
+            answer,
+            user_id=user_id,
+            session_id=resolved_session_id,
+        )
 
     return application
 

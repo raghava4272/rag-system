@@ -125,6 +125,10 @@ class DockerContractTests(unittest.TestCase):
             re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+GROQ_API_KEY\b"),
         )
         self.assertNotIn("COPY .env", self.dockerfile)
+        self.assertNotRegex(
+            self.dockerfile,
+            re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_API_KEY_HASHES\b"),
+        )
 
 
 if __name__ == "__main__":

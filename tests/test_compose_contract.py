@@ -82,6 +82,11 @@ class ComposeContractTests(unittest.TestCase):
         )
         self.assertNotRegex(self.compose, re.compile(r"gsk_[A-Za-z0-9_-]+"))
 
+    def test_injects_hashed_api_identity_configuration_only_into_api(self) -> None:
+        setting = "RAG_API_KEY_HASHES: ${RAG_API_KEY_HASHES:-}"
+        self.assertIn(setting, self.compose)
+        self.assertEqual(self.compose.count(setting), 1)
+
     def test_jobs_use_a_hardened_read_only_runtime(self) -> None:
         self.assertIn("read_only: true", self.compose)
         self.assertIn("init: true", self.compose)

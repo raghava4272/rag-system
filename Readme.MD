@@ -351,9 +351,9 @@ limits, and finally agent decisions without coupling those concerns to the CLI.
 - [x] A non-root, read-only, health-checked Docker Compose API service
 - [x] Exact AMD64 and ARM64 dependency locks for FastAPI and Uvicorn
 
-Authentication and agent tool selection are deliberately not part of this
-phase. Until those are added, do not expose the API directly to the public
-internet.
+Authentication and agent tool selection were deliberately not part of this
+phase. Authentication is added in Phase 5; document authorization and agent
+tool selection still come later.
 
 ### Run the API with Docker
 
@@ -376,6 +376,7 @@ Ask a question:
 
 ```bash
 curl -X POST http://localhost:8000/v1/query \
+  -H "Authorization: Bearer $RAG_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"question":"What is reciprocal rank fusion?","top_k":5}'
 ```
@@ -384,10 +385,54 @@ Open `http://localhost:8000/docs` to try the same contract interactively. If
 the Groq key or another startup dependency is unavailable, liveness remains
 healthy while readiness and query requests return `503`.
 
+## Phase 5: Authentication and Request Identity
+
+Phase 5 establishes who is making each API request before document permissions
+or agent decisions are introduced. The server never trusts a client-provided
+user ID. Instead, each bearer key hash is mapped to a user ID in runtime
+configuration, and the presented key is verified with a constant-time hash
+comparison.
+
+### Scope
+
+- [x] Bearer authentication on `POST /v1/query`
+- [x] Raw API keys kept out of source code, images, and server configuration
+- [x] SHA-256 key hashes mapped to trusted user IDs at runtime
+- [x] Generic `401` response for both missing and invalid credentials
+- [x] Validated client UUID sessions or server-generated UUIDv4 sessions
+- [x] User and session identity returned in the structured response
+- [x] `Cache-Control: no-store` on authenticated query responses
+- [x] Public liveness/readiness probes for container orchestration
+- [x] Readiness failure when authentication is not configured
+
+The session ID is currently a correlation identity, not stored conversation
+memory. Document-level authorization is the next security boundary; until it
+exists, every authenticated user can search the same corpus.
+
+### Create a Local API Key
+
+Generate a strong key for one user:
+
+```bash
+python3 scripts/create_api_key.py --user-id local-user
+```
+
+The command displays the raw key once and prints a
+`RAG_API_KEY_HASHES={...}` line for `.env`. Save the raw key in a password or
+secret manager and add only the printed hash mapping to `.env`. To configure
+multiple users, combine their user-to-hash entries into one JSON object.
+
+Provide the saved raw key to your API client through a secret environment
+variable named `RAG_API_KEY`; it is not the same value as
+`RAG_API_KEY_HASHES`. The query example above reads it from that client-side
+variable. An optional `X-Session-ID` header may contain an existing UUID; when
+omitted, the server generates one and returns it in both the JSON response and
+the `X-Session-ID` response header.
+
 ## Docker Compose Workflow
 
-The application runs as one-shot container jobs; it does not need a web UI or
-long-running server. Build the runtime image once:
+The application supports both one-shot container jobs and a long-running API
+service. Build the runtime image once:
 
 ```bash
 docker compose build
@@ -430,10 +475,11 @@ docker compose run --rm evaluate
 docker compose run --rm report
 ```
 
-Compose reads `GROQ_API_KEY` and `GROQ_MODEL` from the local `.env` file and
-injects them only into the jobs that call Groq. It never adds the key to the
-image. Named volumes persist the Chroma index, downloaded model cache, and
-evaluation report across disposable containers.
+Compose reads `GROQ_API_KEY`, `GROQ_MODEL`, and `RAG_API_KEY_HASHES` from the
+local `.env` file. It injects the authentication hashes only into the API and
+never adds raw keys or hashes to the image. Named volumes persist the Chroma
+index, downloaded model cache, and evaluation report across disposable
+containers.
 
 The Dockerfile selects `requirements-linux-amd64.lock` or
 `requirements-linux-arm64.lock` from BuildKit's target architecture. Compose

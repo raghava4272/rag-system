@@ -42,6 +42,7 @@ services:
     environment:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      RAG_API_KEY_HASHES: ${RAG_API_KEY_HASHES:-}
     ports:
       - "8000:8000"
     restart: unless-stopped
