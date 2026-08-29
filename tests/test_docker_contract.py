@@ -137,6 +137,10 @@ class DockerContractTests(unittest.TestCase):
             self.dockerfile,
             re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_RATE_LIMIT_"),
         )
+        self.assertNotRegex(
+            self.dockerfile,
+            re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_LOG_LEVEL\b"),
+        )
 
 
 if __name__ == "__main__":

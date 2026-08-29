@@ -102,6 +102,11 @@ class ComposeContractTests(unittest.TestCase):
         self.assertEqual(self.compose.count(requests), 1)
         self.assertEqual(self.compose.count(window), 1)
 
+    def test_injects_log_level_only_into_api(self) -> None:
+        setting = "RAG_LOG_LEVEL: ${RAG_LOG_LEVEL:-INFO}"
+        self.assertIn(setting, self.compose)
+        self.assertEqual(self.compose.count(setting), 1)
+
     def test_jobs_use_a_hardened_read_only_runtime(self) -> None:
         self.assertIn("read_only: true", self.compose)
         self.assertIn("init: true", self.compose)

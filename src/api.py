@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,6 +28,11 @@ from src.embed import (
 )
 from src.generate import GeneratedAnswer
 from src.llm import DEFAULT_GROQ_MODEL, GroqLanguageModel
+from src.observability import (
+    bind_log_context,
+    configure_application_logging,
+    normalize_request_id,
+)
 from src.permissions import DocumentPermissions
 from src.pipeline import RAGPipeline
 from src.rate_limit import RateLimitDecision, TokenBucketRateLimiter
@@ -38,7 +44,8 @@ from src.rerank import (
 from src.retrieve import DEFAULT_TOP_K
 
 
-LOGGER = logging.getLogger(__name__)
+configure_application_logging()
+LOGGER = logging.getLogger("rag.api")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MAX_QUESTION_LENGTH = 4_096
 MAX_TOP_K = 20
@@ -296,6 +303,7 @@ def create_app(
     ),
     rate_limiter: RateLimiter | None = None,
     rate_limiter_factory: RateLimiterFactory = build_default_rate_limiter,
+    request_logger: logging.Logger = LOGGER,
 ) -> FastAPI:
     """Build an application with an injectable pipeline for deterministic tests."""
 
@@ -312,7 +320,7 @@ def create_app(
                 )
             except Exception as error:
                 application.state.pipeline = None
-                LOGGER.error(
+                request_logger.error(
                     "RAG pipeline initialization failed (type=%s)",
                     type(error).__name__,
                 )
@@ -323,7 +331,7 @@ def create_app(
                 )
             except Exception as error:
                 application.state.authenticator = None
-                LOGGER.error(
+                request_logger.error(
                     "API authentication initialization failed (type=%s)",
                     type(error).__name__,
                 )
@@ -334,7 +342,7 @@ def create_app(
                 )
             except Exception as error:
                 application.state.document_permissions = None
-                LOGGER.error(
+                request_logger.error(
                     "Document permission initialization failed (type=%s)",
                     type(error).__name__,
                 )
@@ -345,7 +353,7 @@ def create_app(
                 )
             except Exception as error:
                 application.state.rate_limiter = None
-                LOGGER.error(
+                request_logger.error(
                     "Rate limiter initialization failed (type=%s)",
                     type(error).__name__,
                 )
@@ -353,10 +361,59 @@ def create_app(
 
     application = FastAPI(
         title="RAG System API",
-        version="7.0.0",
+        version="8.0.0",
         lifespan=lifespan,
         redoc_url=None,
     )
+
+    @application.middleware("http")
+    async def correlate_and_log_request(
+        request: Request,
+        call_next: Callable,
+    ) -> Response:
+        request_id = normalize_request_id(request.headers.get("X-Request-ID"))
+        request.state.request_id = request_id
+        started_at = time.monotonic()
+        event_fields = {
+            "method": request.method,
+            "path": request.url.path,
+        }
+
+        with bind_log_context(request_id=request_id):
+            request_logger.info("request.started", extra=event_fields)
+            try:
+                result = await call_next(request)
+            except Exception as error:
+                request_logger.error(
+                    "request.failed",
+                    extra={
+                        **event_fields,
+                        "exception_type": type(error).__name__,
+                    },
+                )
+                result = JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    headers={"Cache-Control": "no-store"},
+                    content={
+                        "error": {
+                            "code": "internal_error",
+                            "message": "The service encountered an unexpected error.",
+                        }
+                    },
+                )
+
+            result.headers["X-Request-ID"] = request_id
+            request_logger.info(
+                "request.completed",
+                extra={
+                    **event_fields,
+                    "status_code": result.status_code,
+                    "duration_ms": (time.monotonic() - started_at) * 1_000,
+                    "user_id": getattr(request.state, "user_id", None),
+                    "session_id": getattr(request.state, "session_id", None),
+                },
+            )
+            return result
 
     @application.get(
         "/health/live",
@@ -425,6 +482,9 @@ def create_app(
             user_id = resolved_authenticator.authenticate(credentials.credentials)
         if user_id is None:
             return _unauthorized_response()
+        request.state.user_id = user_id
+        resolved_session_id = requested_session_id or uuid4()
+        request.state.session_id = str(resolved_session_id)
 
         allowed_sources = resolved_permissions.allowed_sources(user_id)
         if allowed_sources is None:
@@ -433,15 +493,19 @@ def create_app(
         try:
             rate_limit_decision = resolved_rate_limiter.check(user_id)
         except Exception as error:
-            LOGGER.error(
+            request_logger.error(
                 "Rate limiter check failed (type=%s)",
                 type(error).__name__,
+                extra={
+                    "user_id": user_id,
+                    "session_id": str(resolved_session_id),
+                    "exception_type": type(error).__name__,
+                },
             )
             return _safe_unavailable_response()
         if not rate_limit_decision.allowed:
             return _rate_limited_response(rate_limit_decision)
 
-        resolved_session_id = requested_session_id or uuid4()
         try:
             answer = await run_in_threadpool(
                 resolved_pipeline.ask,
@@ -450,9 +514,14 @@ def create_app(
                 allowed_sources=allowed_sources,
             )
         except Exception as error:
-            LOGGER.error(
+            request_logger.error(
                 "RAG query execution failed (type=%s)",
                 type(error).__name__,
+                extra={
+                    "user_id": user_id,
+                    "session_id": str(resolved_session_id),
+                    "exception_type": type(error).__name__,
+                },
             )
             return _safe_unavailable_response()
         for header, value in _rate_limit_headers(rate_limit_decision).items():

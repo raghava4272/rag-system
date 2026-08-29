@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import json
+import logging
 import unittest
 from uuid import UUID
 
@@ -10,6 +13,7 @@ from fastapi.testclient import TestClient
 from src.api import create_app
 from src.auth import APIKeyAuthenticator, hash_api_key
 from src.generate import Citation, GeneratedAnswer, NO_CONTEXT_ANSWER
+from src.observability import StructuredJsonFormatter
 from src.permissions import DocumentPermissions
 from src.rate_limit import TokenBucketRateLimiter
 
@@ -88,6 +92,39 @@ class FakePipeline:
 
 
 class ApiHealthTests(unittest.TestCase):
+    def test_every_response_gets_a_safe_request_id(self) -> None:
+        with TestClient(test_app(pipeline=FakePipeline())) as client:
+            generated = client.get("/health/live")
+            preserved = client.get(
+                "/health/live",
+                headers={
+                    "X-Request-ID": "11446D6E-4948-4C80-9816-C752D1416FC5"
+                },
+            )
+            replaced = client.get(
+                "/health/live",
+                headers={"X-Request-ID": "bad-value\nforged-log-line"},
+            )
+
+        self.assertEqual(UUID(generated.headers["x-request-id"]).version, 4)
+        self.assertEqual(
+            preserved.headers["x-request-id"],
+            "11446d6e-4948-4c80-9816-c752d1416fc5",
+        )
+        self.assertEqual(UUID(replaced.headers["x-request-id"]).version, 4)
+        self.assertNotIn("forged", replaced.headers["x-request-id"])
+
+    def test_validation_errors_are_also_correlated(self) -> None:
+        with TestClient(test_app(pipeline=FakePipeline())) as client:
+            response = client.post(
+                "/v1/query",
+                json={"question": ""},
+                headers=auth_headers(),
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(UUID(response.headers["x-request-id"]).version, 4)
+
     def test_liveness_and_readiness_are_distinct(self) -> None:
         with TestClient(test_app(pipeline=FakePipeline())) as client:
             live_response = client.get("/health/live")
@@ -152,6 +189,70 @@ class ApiHealthTests(unittest.TestCase):
 
 
 class ApiQueryTests(unittest.TestCase):
+    def test_request_log_is_correlated_without_sensitive_content(self) -> None:
+        output = io.StringIO()
+        handler = logging.StreamHandler(output)
+        handler.setFormatter(StructuredJsonFormatter())
+        logger = logging.getLogger(f"rag.api-test.{id(self)}")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        private_question = "What does private-project-codename mean?"
+        private_answer = "private-project-codename is confidential [1]."
+        pipeline = FakePipeline(
+            GeneratedAnswer(
+                text=private_answer,
+                citations=[
+                    Citation(
+                        number=1,
+                        record_id="guide.md:0",
+                        source="data/raw/guide.md",
+                        page_number=None,
+                        chunk_index=0,
+                    )
+                ],
+            )
+        )
+        session_id = "b07e89c8-bdb9-456f-a255-718b48afbd43"
+        request_id = "11446d6e-4948-4c80-9816-c752d1416fc5"
+
+        try:
+            with TestClient(
+                test_app(pipeline=pipeline, request_logger=logger)
+            ) as client:
+                response = client.post(
+                    "/v1/query?ignored=private-query-string",
+                    json={"question": private_question},
+                    headers={
+                        **auth_headers(session_id=session_id),
+                        "X-Request-ID": request_id,
+                    },
+                )
+        finally:
+            logger.handlers.clear()
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        completed = next(
+            event for event in events if event["event"] == "request.completed"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(completed["request_id"], request_id)
+        self.assertEqual(completed["user_id"], TEST_USER_ID)
+        self.assertEqual(completed["session_id"], session_id)
+        self.assertEqual(completed["method"], "POST")
+        self.assertEqual(completed["path"], "/v1/query")
+        self.assertEqual(completed["status_code"], 200)
+        self.assertGreaterEqual(completed["duration_ms"], 0)
+        encoded = output.getvalue()
+        for private_value in (
+            TEST_API_KEY,
+            private_question,
+            private_answer,
+            "private-query-string",
+            "Authorization",
+        ):
+            self.assertNotIn(private_value, encoded)
+
     def test_query_returns_a_typed_answer_and_structured_citations(self) -> None:
         pipeline = FakePipeline()
 

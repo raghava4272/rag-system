@@ -508,6 +508,65 @@ API gateway. An edge proxy should also limit invalid-credential traffic and raw
 request body size because those requests cannot safely be assigned to a trusted
 user bucket.
 
+## Phase 8: Structured Logging and Request Correlation
+
+Phase 8 makes one request traceable through the API without putting private RAG
+content into logs. Every HTTP response, including health checks, authentication
+failures, rate-limit responses, and validation errors, receives an
+`X-Request-ID` header. A client may send its own UUID in the same header; the API
+canonicalizes it. Missing or malformed values are replaced with a new UUIDv4,
+so an untrusted header cannot inject forged text into a log line.
+
+Application events are emitted as one JSON object per line. A completed request
+contains the timestamp, severity, event name, request ID, HTTP method, path,
+status code, and duration. After successful authentication it also contains the
+trusted user ID and resolved session ID. This makes it possible to search all
+events for one request or session in a log platform.
+
+### Scope
+
+- [x] A UUID request ID on every API response
+- [x] Safe acceptance and canonicalization of client UUIDs
+- [x] Replacement of malformed correlation headers
+- [x] Machine-readable JSON application logs
+- [x] Request duration and response status metadata
+- [x] Correlation with trusted user and resolved session IDs
+- [x] Allowlisted log fields instead of arbitrary object serialization
+- [x] Generic exception types without exception messages or tracebacks
+- [x] Runtime-selectable bounded log severity
+- [x] Tests proving questions, answers, API keys, headers, query strings, and
+  retrieved content are not logged
+
+Configure the minimum application severity in `.env`:
+
+```dotenv
+RAG_LOG_LEVEL=INFO
+```
+
+The accepted values are `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
+Compose injects this setting only into the API container. The setting is not
+baked into the Docker image.
+
+For example, the response header and matching log event may look like this:
+
+```text
+X-Request-ID: 11446d6e-4948-4c80-9816-c752d1416fc5
+```
+
+```json
+{"timestamp":"2026-08-29T12:00:00.000Z","level":"INFO","logger":"rag.api","event":"request.completed","request_id":"11446d6e-4948-4c80-9816-c752d1416fc5","user_id":"local-user","session_id":"b07e89c8-bdb9-456f-a255-718b48afbd43","method":"POST","path":"/v1/query","status_code":200,"duration_ms":84.213}
+```
+
+The logger intentionally excludes authorization headers, API keys, request and
+response bodies, URL query strings, questions, answers, citations, retrieved
+chunks, raw exception messages, and tracebacks. This reduces exposure, but user
+and session IDs are still operational metadata and should be retained only as
+long as necessary.
+
+Request correlation is not distributed tracing. It connects events inside this
+API process, but it does not yet create spans across Groq, vector storage, or
+future services. W3C trace propagation and OpenTelemetry remain a later phase.
+
 ## Docker Compose Workflow
 
 The application supports both one-shot container jobs and a long-running API
@@ -556,8 +615,9 @@ docker compose run --rm report
 
 Compose reads `GROQ_API_KEY`, `GROQ_MODEL`, `RAG_API_KEY_HASHES`, and
 `RAG_DOCUMENT_PERMISSIONS` from the local `.env` file, along with the optional
-rate-limit settings. It injects authentication hashes, document policy, and API
-limits only into the API and never adds them to the image. Named volumes persist
+rate-limit and log-level settings. It injects authentication hashes, document
+policy, API limits, and application logging configuration only into the API and
+never adds them to the image. Named volumes persist
 the Chroma index, downloaded model cache, and evaluation report across
 disposable containers.
 
