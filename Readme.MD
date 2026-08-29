@@ -468,6 +468,46 @@ receives an exact metadata filter, BM25 removes out-of-scope candidates before
 ranking, and the pipeline independently rejects any out-of-scope result as a
 last line of defense.
 
+## Phase 7: Per-User Rate Limiting
+
+Phase 7 protects the expensive retrieval and Groq path from sustained request
+bursts. Each authenticated server-side user ID receives an independent token
+bucket. Session IDs and client-provided `X-User-ID` headers do not affect the
+bucket, so opening a new session or spoofing a header cannot reset the quota.
+
+### Scope
+
+- [x] Thread-safe token consumption for concurrent API requests
+- [x] Independent limits keyed by trusted authenticated user ID
+- [x] Smooth token refill instead of fixed-window boundary bursts
+- [x] `429 Too Many Requests` before retrieval or Groq execution
+- [x] `RateLimit-Limit` and `RateLimit-Remaining` response headers
+- [x] `Retry-After` on blocked requests
+- [x] Safe defaults with bounded runtime configuration
+- [x] Stale identity cleanup to prevent unbounded bucket growth
+- [x] Readiness failure if limiter initialization is invalid
+- [x] Public health probes remain outside the user quota
+
+The defaults allow 30 requests per 60 seconds, with an initial burst capacity
+of 30. Override them in `.env` when needed:
+
+```dotenv
+RAG_RATE_LIMIT_REQUESTS=30
+RAG_RATE_LIMIT_WINDOW_SECONDS=60
+```
+
+The values must be integers. Requests are bounded to `1-10000`, and the window
+is bounded to `1-86400` seconds. Invalid configuration makes readiness fail
+instead of silently disabling the limiter.
+
+This limiter intentionally matches the current Compose deployment: one Uvicorn
+process in one API container. Its counters are held in that process. Before
+running multiple workers or replicas, replace the limiter backend with a shared
+atomic store such as Redis or enforce the same authenticated-user policy at an
+API gateway. An edge proxy should also limit invalid-credential traffic and raw
+request body size because those requests cannot safely be assigned to a trusted
+user bucket.
+
 ## Docker Compose Workflow
 
 The application supports both one-shot container jobs and a long-running API
@@ -515,10 +555,11 @@ docker compose run --rm report
 ```
 
 Compose reads `GROQ_API_KEY`, `GROQ_MODEL`, `RAG_API_KEY_HASHES`, and
-`RAG_DOCUMENT_PERMISSIONS` from the local `.env` file. It injects authentication
-hashes and document policy only into the API and never adds them to the image.
-Named volumes persist the Chroma index, downloaded model cache, and evaluation
-report across disposable containers.
+`RAG_DOCUMENT_PERMISSIONS` from the local `.env` file, along with the optional
+rate-limit settings. It injects authentication hashes, document policy, and API
+limits only into the API and never adds them to the image. Named volumes persist
+the Chroma index, downloaded model cache, and evaluation report across
+disposable containers.
 
 The Dockerfile selects `requirements-linux-amd64.lock` or
 `requirements-linux-arm64.lock` from BuildKit's target architecture. Compose

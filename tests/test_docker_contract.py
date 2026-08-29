@@ -133,6 +133,10 @@ class DockerContractTests(unittest.TestCase):
             self.dockerfile,
             re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_DOCUMENT_PERMISSIONS\b"),
         )
+        self.assertNotRegex(
+            self.dockerfile,
+            re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_RATE_LIMIT_"),
+        )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from src.generate import GeneratedAnswer
 from src.llm import DEFAULT_GROQ_MODEL, GroqLanguageModel
 from src.permissions import DocumentPermissions
 from src.pipeline import RAGPipeline
+from src.rate_limit import RateLimitDecision, TokenBucketRateLimiter
 from src.rerank import (
     DEFAULT_MIN_RELEVANCE_SCORE,
     DEFAULT_RERANK_CANDIDATE_K,
@@ -70,6 +71,13 @@ class PermissionResolver(Protocol):
 
 
 PermissionResolverFactory = Callable[[], PermissionResolver]
+
+
+class RateLimiter(Protocol):
+    def check(self, identity: str) -> RateLimitDecision: ...
+
+
+RateLimiterFactory = Callable[[], RateLimiter]
 
 
 class QueryRequest(BaseModel):
@@ -171,6 +179,20 @@ def build_default_document_permissions() -> DocumentPermissions:
     return DocumentPermissions.from_environment()
 
 
+def build_default_rate_limiter() -> TokenBucketRateLimiter:
+    """Load bounded per-user request limits from runtime configuration."""
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError(
+            "The API requires python-dotenv. Install the locked dependencies."
+        ) from error
+
+    load_dotenv(PROJECT_ROOT / ".env")
+    return TokenBucketRateLimiter.from_environment()
+
+
 def _safe_unavailable_response() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -213,6 +235,31 @@ def _forbidden_response() -> JSONResponse:
     )
 
 
+def _rate_limit_headers(decision: RateLimitDecision) -> dict[str, str]:
+    return {
+        "RateLimit-Limit": str(decision.limit),
+        "RateLimit-Remaining": str(decision.remaining),
+    }
+
+
+def _rate_limited_response(decision: RateLimitDecision) -> JSONResponse:
+    headers = _rate_limit_headers(decision)
+    headers.update({
+        "Cache-Control": "no-store",
+        "Retry-After": str(decision.retry_after_seconds),
+    })
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        headers=headers,
+        content={
+            "error": {
+                "code": "rate_limited",
+                "message": "Too many requests. Try again later.",
+            }
+        },
+    )
+
+
 def _query_response(
     answer: GeneratedAnswer,
     *,
@@ -247,6 +294,8 @@ def create_app(
     document_permissions_factory: PermissionResolverFactory = (
         build_default_document_permissions
     ),
+    rate_limiter: RateLimiter | None = None,
+    rate_limiter_factory: RateLimiterFactory = build_default_rate_limiter,
 ) -> FastAPI:
     """Build an application with an injectable pipeline for deterministic tests."""
 
@@ -255,6 +304,7 @@ def create_app(
         application.state.pipeline = pipeline
         application.state.authenticator = authenticator
         application.state.document_permissions = document_permissions
+        application.state.rate_limiter = rate_limiter
         if application.state.pipeline is None:
             try:
                 application.state.pipeline = await run_in_threadpool(
@@ -288,11 +338,22 @@ def create_app(
                     "Document permission initialization failed (type=%s)",
                     type(error).__name__,
                 )
+        if application.state.rate_limiter is None:
+            try:
+                application.state.rate_limiter = await run_in_threadpool(
+                    rate_limiter_factory
+                )
+            except Exception as error:
+                application.state.rate_limiter = None
+                LOGGER.error(
+                    "Rate limiter initialization failed (type=%s)",
+                    type(error).__name__,
+                )
         yield
 
     application = FastAPI(
         title="RAG System API",
-        version="6.0.0",
+        version="7.0.0",
         lifespan=lifespan,
         redoc_url=None,
     )
@@ -316,6 +377,7 @@ def create_app(
             request.app.state.pipeline is None
             or request.app.state.authenticator is None
             or request.app.state.document_permissions is None
+            or request.app.state.rate_limiter is None
         ):
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -331,6 +393,7 @@ def create_app(
         responses={
             status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
             status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+            status.HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponse},
             status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
         },
         tags=["rag"],
@@ -348,10 +411,12 @@ def create_app(
         resolved_pipeline = request.app.state.pipeline
         resolved_authenticator = request.app.state.authenticator
         resolved_permissions = request.app.state.document_permissions
+        resolved_rate_limiter = request.app.state.rate_limiter
         if (
             resolved_pipeline is None
             or resolved_authenticator is None
             or resolved_permissions is None
+            or resolved_rate_limiter is None
         ):
             return _safe_unavailable_response()
 
@@ -364,6 +429,17 @@ def create_app(
         allowed_sources = resolved_permissions.allowed_sources(user_id)
         if allowed_sources is None:
             return _forbidden_response()
+
+        try:
+            rate_limit_decision = resolved_rate_limiter.check(user_id)
+        except Exception as error:
+            LOGGER.error(
+                "Rate limiter check failed (type=%s)",
+                type(error).__name__,
+            )
+            return _safe_unavailable_response()
+        if not rate_limit_decision.allowed:
+            return _rate_limited_response(rate_limit_decision)
 
         resolved_session_id = requested_session_id or uuid4()
         try:
@@ -379,6 +455,8 @@ def create_app(
                 type(error).__name__,
             )
             return _safe_unavailable_response()
+        for header, value in _rate_limit_headers(rate_limit_decision).items():
+            response.headers[header] = value
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Session-ID"] = str(resolved_session_id)
         return _query_response(

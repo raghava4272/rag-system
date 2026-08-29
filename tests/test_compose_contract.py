@@ -92,6 +92,16 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn(setting, self.compose)
         self.assertEqual(self.compose.count(setting), 1)
 
+    def test_injects_bounded_rate_limit_configuration_only_into_api(self) -> None:
+        requests = "RAG_RATE_LIMIT_REQUESTS: ${RAG_RATE_LIMIT_REQUESTS:-30}"
+        window = (
+            "RAG_RATE_LIMIT_WINDOW_SECONDS: ${RAG_RATE_LIMIT_WINDOW_SECONDS:-60}"
+        )
+        self.assertIn(requests, self.compose)
+        self.assertIn(window, self.compose)
+        self.assertEqual(self.compose.count(requests), 1)
+        self.assertEqual(self.compose.count(window), 1)
+
     def test_jobs_use_a_hardened_read_only_runtime(self) -> None:
         self.assertIn("read_only: true", self.compose)
         self.assertIn("init: true", self.compose)

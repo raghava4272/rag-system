@@ -11,6 +11,7 @@ from src.api import create_app
 from src.auth import APIKeyAuthenticator, hash_api_key
 from src.generate import Citation, GeneratedAnswer, NO_CONTEXT_ANSWER
 from src.permissions import DocumentPermissions
+from src.rate_limit import TokenBucketRateLimiter
 
 
 TEST_API_KEY = "test-api-key-with-at-least-thirty-two-characters"
@@ -26,6 +27,14 @@ def test_permissions() -> DocumentPermissions:
     return DocumentPermissions({TEST_USER_ID: sorted(TEST_ALLOWED_SOURCES)})
 
 
+def test_rate_limiter(*, requests: int = 100) -> TokenBucketRateLimiter:
+    return TokenBucketRateLimiter(
+        requests=requests,
+        window_seconds=60,
+        clock=lambda: 100.0,
+    )
+
+
 def auth_headers(*, session_id: str | None = None) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {TEST_API_KEY}"}
     if session_id is not None:
@@ -38,6 +47,7 @@ def test_app(*, pipeline: object, **kwargs: object):
         pipeline=pipeline,
         authenticator=test_authenticator(),
         document_permissions=test_permissions(),
+        rate_limiter=test_rate_limiter(),
         **kwargs,
     )
 
@@ -412,6 +422,87 @@ class ApiDocumentAuthorizationTests(unittest.TestCase):
         self.assertEqual(ready.status_code, 503)
         self.assertEqual(query.status_code, 503)
         self.assertNotIn("private source", ready.text + query.text)
+
+
+class ApiRateLimitTests(unittest.TestCase):
+    def test_per_user_limit_blocks_pipeline_and_returns_retry_headers(self) -> None:
+        pipeline = FakePipeline()
+        limiter = test_rate_limiter(requests=2)
+        bypass_headers = auth_headers(
+            session_id="d31cb570-0dd2-40eb-95f6-c753b647bc89"
+        )
+        bypass_headers["X-User-ID"] = "different-user"
+
+        with TestClient(
+            create_app(
+                pipeline=pipeline,
+                authenticator=test_authenticator(),
+                document_permissions=test_permissions(),
+                rate_limiter=limiter,
+            )
+        ) as client:
+            first = client.post(
+                "/v1/query",
+                json={"question": "First question?"},
+                headers=auth_headers(
+                    session_id="11446d6e-4948-4c80-9816-c752d1416fc5"
+                ),
+            )
+            second = client.post(
+                "/v1/query",
+                json={"question": "Second question?"},
+                headers=auth_headers(
+                    session_id="b07e89c8-bdb9-456f-a255-718b48afbd43"
+                ),
+            )
+            blocked = client.post(
+                "/v1/query",
+                json={"question": "Third question?"},
+                headers=bypass_headers,
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.headers["ratelimit-limit"], "2")
+        self.assertEqual(first.headers["ratelimit-remaining"], "1")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.headers["ratelimit-remaining"], "0")
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.headers["retry-after"], "30")
+        self.assertEqual(blocked.headers["ratelimit-limit"], "2")
+        self.assertEqual(blocked.headers["ratelimit-remaining"], "0")
+        self.assertEqual(
+            blocked.json(),
+            {
+                "error": {
+                    "code": "rate_limited",
+                    "message": "Too many requests. Try again later.",
+                }
+            },
+        )
+        self.assertEqual(len(pipeline.calls), 2)
+
+    def test_missing_limiter_fails_readiness_without_leaking_details(self) -> None:
+        def fail_to_build_limiter() -> TokenBucketRateLimiter:
+            raise RuntimeError("private infrastructure detail")
+
+        with TestClient(
+            create_app(
+                pipeline=FakePipeline(),
+                authenticator=test_authenticator(),
+                document_permissions=test_permissions(),
+                rate_limiter_factory=fail_to_build_limiter,
+            )
+        ) as client:
+            ready = client.get("/health/ready")
+            query = client.post(
+                "/v1/query",
+                json={"question": "What is RAG?"},
+                headers=auth_headers(),
+            )
+
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(query.status_code, 503)
+        self.assertNotIn("private infrastructure", ready.text + query.text)
 
 
 if __name__ == "__main__":
