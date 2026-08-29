@@ -10,14 +10,20 @@ from fastapi.testclient import TestClient
 from src.api import create_app
 from src.auth import APIKeyAuthenticator, hash_api_key
 from src.generate import Citation, GeneratedAnswer, NO_CONTEXT_ANSWER
+from src.permissions import DocumentPermissions
 
 
 TEST_API_KEY = "test-api-key-with-at-least-thirty-two-characters"
 TEST_USER_ID = "test-user"
+TEST_ALLOWED_SOURCES = frozenset({"data/raw/guide.md"})
 
 
 def test_authenticator() -> APIKeyAuthenticator:
     return APIKeyAuthenticator({TEST_USER_ID: hash_api_key(TEST_API_KEY)})
+
+
+def test_permissions() -> DocumentPermissions:
+    return DocumentPermissions({TEST_USER_ID: sorted(TEST_ALLOWED_SOURCES)})
 
 
 def auth_headers(*, session_id: str | None = None) -> dict[str, str]:
@@ -31,6 +37,7 @@ def test_app(*, pipeline: object, **kwargs: object):
     return create_app(
         pipeline=pipeline,
         authenticator=test_authenticator(),
+        document_permissions=test_permissions(),
         **kwargs,
     )
 
@@ -55,10 +62,16 @@ class FakePipeline:
             ],
         )
         self.error = error
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, frozenset[str]]] = []
 
-    def ask(self, question: str, *, top_k: int) -> GeneratedAnswer:
-        self.calls.append((question, top_k))
+    def ask(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str],
+    ) -> GeneratedAnswer:
+        self.calls.append((question, top_k, allowed_sources))
         if self.error is not None:
             raise self.error
         return self.answer
@@ -83,6 +96,7 @@ class ApiHealthTests(unittest.TestCase):
             create_app(
                 pipeline_factory=fail_to_build,
                 authenticator=test_authenticator(),
+                document_permissions=test_permissions(),
             )
         ) as client:
             live_response = client.get("/health/live")
@@ -110,6 +124,7 @@ class ApiHealthTests(unittest.TestCase):
             create_app(
                 pipeline_factory=build_pipeline,
                 authenticator=test_authenticator(),
+                document_permissions=test_permissions(),
             )
         ) as client:
             client.post(
@@ -142,7 +157,7 @@ class ApiQueryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             pipeline.calls,
-            [("How does hybrid retrieval work?", 3)],
+            [("How does hybrid retrieval work?", 3, TEST_ALLOWED_SOURCES)],
         )
         self.assertEqual(
             response.json(),
@@ -305,6 +320,7 @@ class ApiAuthenticationTests(unittest.TestCase):
             create_app(
                 pipeline=FakePipeline(),
                 authenticator_factory=fail_to_build_authenticator,
+                document_permissions=test_permissions(),
             )
         ) as client:
             ready = client.get("/health/ready")
@@ -326,6 +342,76 @@ class ApiAuthenticationTests(unittest.TestCase):
         self.assertEqual(security_schemes["HTTPBearer"]["scheme"], "bearer")
         self.assertIn("security", schema["paths"]["/v1/query"]["post"])
         self.assertNotIn("security", schema["paths"]["/health/live"]["get"])
+
+
+class ApiDocumentAuthorizationTests(unittest.TestCase):
+    def test_authenticated_identity_selects_the_retrieval_scope(self) -> None:
+        pipeline = FakePipeline()
+
+        with TestClient(test_app(pipeline=pipeline)) as client:
+            response = client.post(
+                "/v1/query",
+                json={"question": "What is RAG?"},
+                headers=auth_headers(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            pipeline.calls,
+            [("What is RAG?", 5, TEST_ALLOWED_SOURCES)],
+        )
+
+    def test_authenticated_user_without_a_permission_rule_is_forbidden(self) -> None:
+        pipeline = FakePipeline()
+        permissions = DocumentPermissions({"different-user": ["data/raw/guide.md"]})
+
+        with TestClient(
+            create_app(
+                pipeline=pipeline,
+                authenticator=test_authenticator(),
+                document_permissions=permissions,
+            )
+        ) as client:
+            response = client.post(
+                "/v1/query",
+                json={"question": "What is RAG?"},
+                headers=auth_headers(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json(),
+            {
+                "error": {
+                    "code": "forbidden",
+                    "message": "The authenticated user cannot access this resource.",
+                }
+            },
+        )
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(pipeline.calls, [])
+
+    def test_missing_permission_configuration_fails_readiness_safely(self) -> None:
+        def fail_to_build_permissions() -> DocumentPermissions:
+            raise RuntimeError("private source names must not reach responses")
+
+        with TestClient(
+            create_app(
+                pipeline=FakePipeline(),
+                authenticator=test_authenticator(),
+                document_permissions_factory=fail_to_build_permissions,
+            )
+        ) as client:
+            ready = client.get("/health/ready")
+            query = client.post(
+                "/v1/query",
+                json={"question": "What is RAG?"},
+                headers=auth_headers(),
+            )
+
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(query.status_code, 503)
+        self.assertNotIn("private source", ready.text + query.text)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ class SearchableVectorStore(Protocol):
         query_embedding: Sequence[float],
         *,
         top_k: int,
+        allowed_sources: frozenset[str] | None = None,
     ) -> list[RetrievedChunk]: ...
 
 
@@ -37,15 +38,21 @@ class SemanticRetriever:
         query: str,
         *,
         top_k: int = DEFAULT_TOP_K,
+        allowed_sources: frozenset[str] | None = None,
     ) -> list[RetrievedChunk]:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query cannot be empty")
         if top_k <= 0:
             raise ValueError("top_k must be greater than zero")
+        if allowed_sources is not None and not allowed_sources:
+            return []
 
         query_embedding = self.embedding_provider.embed_query(normalized_query)
         if not query_embedding:
             raise ValueError("The embedding provider returned an empty query embedding")
-        return self.vector_store.search(query_embedding, top_k=top_k)
-
+        return self.vector_store.search(
+            query_embedding,
+            top_k=top_k,
+            allowed_sources=allowed_sources,
+        )

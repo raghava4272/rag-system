@@ -44,10 +44,16 @@ class FakeVectorStore:
 class FakeRetriever:
     def __init__(self, results: list[RetrievedChunk]) -> None:
         self.results = results
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, frozenset[str] | None]] = []
 
-    def retrieve(self, query: str, *, top_k: int) -> list[RetrievedChunk]:
-        self.calls.append((query, top_k))
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[RetrievedChunk]:
+        self.calls.append((query, top_k, allowed_sources))
         return self.results
 
 
@@ -105,7 +111,7 @@ class QuestionAnswerPipelineTests(unittest.TestCase):
 
         answer = pipeline.ask("How does RAG work?", top_k=4)
 
-        self.assertEqual(retriever.calls, [("How does RAG work?", 4)])
+        self.assertEqual(retriever.calls, [("How does RAG work?", 4, None)])
         self.assertEqual(answer.text, model.response)
         self.assertEqual(answer.citations[0].source, "guide.md")
         self.assertEqual(len(model.prompts), 1)
@@ -119,6 +125,47 @@ class QuestionAnswerPipelineTests(unittest.TestCase):
 
         self.assertEqual(answer.text, NO_CONTEXT_ANSWER)
         self.assertEqual(answer.citations, [])
+        self.assertEqual(model.prompts, [])
+
+    def test_permission_scope_is_forwarded_and_checked_before_generation(self) -> None:
+        allowed = frozenset({"team-a.md"})
+        chunks = [
+            RetrievedChunk(
+                id="team-a:0",
+                text="Team A evidence.",
+                metadata={"source": "team-a.md", "chunk_index": 0},
+                distance=0.1,
+                rank=1,
+            )
+        ]
+        retriever = FakeRetriever(chunks)
+        model = FakeLanguageModel("Team A evidence is available [1].")
+        pipeline = RAGPipeline(retriever=retriever, language_model=model)
+
+        pipeline.ask("What can Team A see?", allowed_sources=allowed)
+
+        self.assertEqual(retriever.calls, [("What can Team A see?", 5, allowed)])
+        self.assertEqual(len(model.prompts), 1)
+
+    def test_pipeline_blocks_out_of_scope_chunk_before_it_reaches_the_model(self) -> None:
+        retriever = FakeRetriever([
+            RetrievedChunk(
+                id="team-b:0",
+                text="Team B secret.",
+                metadata={"source": "team-b.md", "chunk_index": 0},
+                distance=0.1,
+                rank=1,
+            )
+        ])
+        model = FakeLanguageModel("must not run")
+        pipeline = RAGPipeline(retriever=retriever, language_model=model)
+
+        with self.assertRaises(PermissionError):
+            pipeline.ask(
+                "What is Team B's secret?",
+                allowed_sources=frozenset({"team-a.md"}),
+            )
+
         self.assertEqual(model.prompts, [])
 
 

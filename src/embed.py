@@ -226,6 +226,7 @@ class ChromaVectorStore:
         query_embedding: Sequence[float],
         *,
         top_k: int,
+        allowed_sources: frozenset[str] | None = None,
     ) -> list[RetrievedChunk]:
         """Return the nearest stored chunks for one precomputed query vector."""
 
@@ -233,12 +234,19 @@ class ChromaVectorStore:
             raise ValueError("top_k must be greater than zero")
         if not query_embedding:
             raise ValueError("query_embedding cannot be empty")
+        if allowed_sources is not None and not allowed_sources:
+            return []
 
-        response = self.collection.query(
+        query_options: dict[str, Any] = dict(
             query_embeddings=[[float(value) for value in query_embedding]],
             n_results=top_k,
             include=["documents", "metadatas", "distances"],
         )
+        if allowed_sources is not None:
+            query_options["where"] = {
+                "source": {"$in": sorted(allowed_sources)},
+            }
+        response = self.collection.query(**query_options)
 
         try:
             id_batches = response.get("ids") or [[]]

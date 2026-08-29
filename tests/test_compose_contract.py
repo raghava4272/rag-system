@@ -87,6 +87,11 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn(setting, self.compose)
         self.assertEqual(self.compose.count(setting), 1)
 
+    def test_injects_document_permissions_only_into_api(self) -> None:
+        setting = "RAG_DOCUMENT_PERMISSIONS: ${RAG_DOCUMENT_PERMISSIONS:-}"
+        self.assertIn(setting, self.compose)
+        self.assertEqual(self.compose.count(setting), 1)
+
     def test_jobs_use_a_hardened_read_only_runtime(self) -> None:
         self.assertIn("read_only: true", self.compose)
         self.assertIn("init: true", self.compose)

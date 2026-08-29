@@ -27,7 +27,13 @@ Token = TypeVar("Token")
 
 
 class Retriever(Protocol):
-    def retrieve(self, query: str, *, top_k: int) -> Sequence[RetrievedChunk]: ...
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> Sequence[RetrievedChunk]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,18 +233,38 @@ class RAGPipeline:
         question: str,
         *,
         top_k: int = DEFAULT_TOP_K,
+        allowed_sources: frozenset[str] | None = None,
     ) -> GeneratedAnswer:
-        return self.run(question, top_k=top_k).answer
+        return self.run(
+            question,
+            top_k=top_k,
+            allowed_sources=allowed_sources,
+        ).answer
 
     def run(
         self,
         question: str,
         *,
         top_k: int = DEFAULT_TOP_K,
+        allowed_sources: frozenset[str] | None = None,
     ) -> RAGRun:
         """Retrieve and answer while preserving contexts for evaluation."""
 
-        chunks = tuple(self.retriever.retrieve(question, top_k=top_k))
+        if allowed_sources is None:
+            chunks = tuple(self.retriever.retrieve(question, top_k=top_k))
+        else:
+            chunks = tuple(
+                self.retriever.retrieve(
+                    question,
+                    top_k=top_k,
+                    allowed_sources=allowed_sources,
+                )
+            )
+            if any(
+                chunk.metadata.get("source") not in allowed_sources
+                for chunk in chunks
+            ):
+                raise PermissionError("Retriever returned evidence outside its scope")
         answer = generate_answer(
             question,
             list(chunks),

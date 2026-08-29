@@ -129,6 +129,10 @@ class DockerContractTests(unittest.TestCase):
             self.dockerfile,
             re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_API_KEY_HASHES\b"),
         )
+        self.assertNotRegex(
+            self.dockerfile,
+            re.compile(r"(?mi)^\s*(?:ARG|ENV)\s+RAG_DOCUMENT_PERMISSIONS\b"),
+        )
 
 
 if __name__ == "__main__":

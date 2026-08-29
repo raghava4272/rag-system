@@ -24,12 +24,16 @@ class FakeEmbeddingProvider:
 class FakeSearchStore:
     def __init__(self, results: list[RetrievedChunk]) -> None:
         self.results = results
-        self.search_calls: list[tuple[list[float], int]] = []
+        self.search_calls: list[tuple[list[float], int, frozenset[str] | None]] = []
 
     def search(
-        self, query_embedding: Sequence[float], *, top_k: int
+        self,
+        query_embedding: Sequence[float],
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
     ) -> list[RetrievedChunk]:
-        self.search_calls.append((list(query_embedding), top_k))
+        self.search_calls.append((list(query_embedding), top_k, allowed_sources))
         return self.results
 
 
@@ -77,7 +81,30 @@ class SemanticRetrieverTests(unittest.TestCase):
 
         self.assertEqual(results, self.expected)
         self.assertEqual(self.embedder.query_calls, ["How does retrieval work?"])
-        self.assertEqual(self.store.search_calls, [([0.25, 0.75], 3)])
+        self.assertEqual(self.store.search_calls, [([0.25, 0.75], 3, None)])
+
+    def test_allowed_sources_are_applied_inside_vector_search(self) -> None:
+        allowed = frozenset({"data/raw/team-a.md"})
+
+        results = self.retriever.retrieve(
+            "private question",
+            top_k=2,
+            allowed_sources=allowed,
+        )
+
+        self.assertEqual(results, self.expected)
+        self.assertEqual(self.store.search_calls, [([0.25, 0.75], 2, allowed)])
+
+    def test_empty_permission_scope_skips_embedding_and_storage(self) -> None:
+        results = self.retriever.retrieve(
+            "private question",
+            top_k=2,
+            allowed_sources=frozenset(),
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(self.embedder.query_calls, [])
+        self.assertEqual(self.store.search_calls, [])
 
     def test_blank_query_is_rejected_without_external_calls(self) -> None:
         with self.assertRaisesRegex(ValueError, "query"):
@@ -148,6 +175,23 @@ class ChromaSearchAdapterTests(unittest.TestCase):
         store = ChromaVectorStore(client=FakeChromaClient(collection))
 
         self.assertEqual(store.search([1.0, 0.0], top_k=5), [])
+
+    def test_chroma_uses_an_exact_source_filter_for_authorized_search(self) -> None:
+        collection = FakeQueryCollection(
+            {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+        )
+        store = ChromaVectorStore(client=FakeChromaClient(collection))
+
+        store.search(
+            [1.0, 0.0],
+            top_k=5,
+            allowed_sources=frozenset({"data/raw/b.md", "data/raw/a.md"}),
+        )
+
+        self.assertEqual(
+            collection.query_options["where"],
+            {"source": {"$in": ["data/raw/a.md", "data/raw/b.md"]}},
+        )
 
     def test_malformed_chroma_columns_are_rejected(self) -> None:
         collection = FakeQueryCollection(

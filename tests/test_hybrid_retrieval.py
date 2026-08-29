@@ -42,10 +42,16 @@ def bm25_result(
 class FakeRetriever:
     def __init__(self, results: list[object]) -> None:
         self.results = results
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, frozenset[str] | None]] = []
 
-    def retrieve(self, query: str, *, top_k: int) -> list[object]:
-        self.calls.append((query, top_k))
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[object]:
+        self.calls.append((query, top_k, allowed_sources))
         return self.results
 
 
@@ -128,9 +134,24 @@ class HybridRetrieverTests(unittest.TestCase):
 
         results = retriever.retrieve("How does retrieval work?", top_k=3)
 
-        self.assertEqual(vector.calls, [("How does retrieval work?", 10)])
-        self.assertEqual(keyword.calls, [("How does retrieval work?", 10)])
+        self.assertEqual(vector.calls, [("How does retrieval work?", 10, None)])
+        self.assertEqual(keyword.calls, [("How does retrieval work?", 10, None)])
         self.assertEqual([result.id for result in results], ["shared"])
+
+    def test_permission_scope_is_forwarded_to_both_retrieval_methods(self) -> None:
+        vector = FakeRetriever([])
+        keyword = FakeRetriever([])
+        retriever = HybridRetriever(
+            vector_retriever=vector,
+            bm25_retriever=keyword,
+            candidate_k=10,
+        )
+        allowed = frozenset({"team-a.md"})
+
+        retriever.retrieve("private question", top_k=3, allowed_sources=allowed)
+
+        self.assertEqual(vector.calls, [("private question", 10, allowed)])
+        self.assertEqual(keyword.calls, [("private question", 10, allowed)])
 
     def test_invalid_query_and_limits_are_rejected_before_search(self) -> None:
         vector = FakeRetriever([])

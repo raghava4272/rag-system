@@ -44,14 +44,15 @@ class BM25Retriever:
 
     def __init__(self, documents: Sequence[BM25Document]) -> None:
         self.documents = list(documents)
-        self._index: Any | None = None
-        if not self.documents:
-            return
+        self._index = self._build_index(self.documents)
 
-        tokenized_corpus = [_tokenize(document.text) for document in self.documents]
+    @staticmethod
+    def _build_index(documents: Sequence[BM25Document]) -> Any | None:
+        if not documents:
+            return None
+        tokenized_corpus = [_tokenize(document.text) for document in documents]
         if any(not tokens for tokens in tokenized_corpus):
             raise ValueError("BM25 documents must contain searchable text")
-
         try:
             from rank_bm25 import BM25Okapi
         except ImportError as error:
@@ -59,10 +60,15 @@ class BM25Retriever:
                 "BM25 retrieval requires rank-bm25. Install dependencies with "
                 "`python3 -m pip install -r requirements.txt`."
             ) from error
+        return BM25Okapi(tokenized_corpus)
 
-        self._index = BM25Okapi(tokenized_corpus)
-
-    def retrieve(self, query: str, *, top_k: int) -> list[BM25Result]:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[BM25Result]:
         """Return positive-score keyword matches in descending relevance order."""
 
         normalized_query = query.strip()
@@ -70,6 +76,8 @@ class BM25Retriever:
             raise ValueError("query cannot be empty")
         if top_k <= 0:
             raise ValueError("top_k must be greater than zero")
+        if allowed_sources is not None and not allowed_sources:
+            return []
         if self._index is None:
             return []
 
@@ -82,6 +90,10 @@ class BM25Retriever:
             (float(score), index, document)
             for index, (score, document) in enumerate(zip(scores, self.documents))
             if float(score) > 0.0
+            and (
+                allowed_sources is None
+                or document.metadata.get("source") in allowed_sources
+            )
         ]
         scored_documents.sort(key=lambda item: (-item[0], item[1]))
 

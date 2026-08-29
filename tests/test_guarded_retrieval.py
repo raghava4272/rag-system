@@ -41,10 +41,16 @@ def reranked_result(
 class FakeHybridRetriever:
     def __init__(self, results: list[HybridResult]) -> None:
         self.results = results
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, frozenset[str] | None]] = []
 
-    def retrieve(self, query: str, *, top_k: int) -> list[HybridResult]:
-        self.calls.append((query, top_k))
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[HybridResult]:
+        self.calls.append((query, top_k, allowed_sources))
         return self.results
 
 
@@ -94,9 +100,25 @@ class RerankingRetrieverTests(unittest.TestCase):
 
         results = retriever.retrieve("question", top_k=2)
 
-        self.assertEqual(hybrid.calls, [("question", 10)])
+        self.assertEqual(hybrid.calls, [("question", 10, None)])
         self.assertEqual(reranker.calls, [("question", self.candidates, 2)])
         self.assertEqual(results, expected)
+
+    def test_permission_scope_reaches_hybrid_retrieval_before_reranking(self) -> None:
+        hybrid = FakeHybridRetriever([])
+        reranker = FakeReranker([])
+        retriever = RerankingRetriever(
+            hybrid_retriever=hybrid,
+            reranker=reranker,
+        )
+        allowed = frozenset({"team-a.md"})
+
+        self.assertEqual(
+            retriever.retrieve("private question", top_k=3, allowed_sources=allowed),
+            [],
+        )
+        self.assertEqual(hybrid.calls, [("private question", 10, allowed)])
+        self.assertEqual(reranker.calls, [])
 
     def test_chunks_below_relevance_threshold_are_removed(self) -> None:
         hybrid = FakeHybridRetriever(self.candidates)

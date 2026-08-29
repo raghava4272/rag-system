@@ -35,6 +35,7 @@ class HybridCandidateRetriever(Protocol):
         query: str,
         *,
         top_k: int,
+        allowed_sources: frozenset[str] | None = None,
     ) -> Sequence[HybridResult]: ...
 
 
@@ -156,7 +157,13 @@ class RerankingRetriever:
         self.candidate_k = candidate_k
         self.min_relevance_score = min_relevance_score
 
-    def retrieve(self, query: str, *, top_k: int) -> list[RerankedResult]:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[RerankedResult]:
         """Return only reranked chunks with enough direct query relevance."""
 
         normalized_query = query.strip()
@@ -169,6 +176,7 @@ class RerankingRetriever:
             self.hybrid_retriever.retrieve(
                 normalized_query,
                 top_k=self.candidate_k,
+                allowed_sources=allowed_sources,
             )
         )
         if not candidates:

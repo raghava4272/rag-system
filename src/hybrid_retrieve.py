@@ -23,7 +23,13 @@ class RankedChunk(Protocol):
 
 
 class RankedRetriever(Protocol):
-    def retrieve(self, query: str, *, top_k: int) -> Sequence[RankedChunk]: ...
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> Sequence[RankedChunk]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +138,13 @@ class HybridRetriever:
         self.candidate_k = candidate_k
         self.rrf_k = rrf_k
 
-    def retrieve(self, query: str, *, top_k: int) -> list[HybridResult]:
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str] | None = None,
+    ) -> list[HybridResult]:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query cannot be empty")
@@ -142,10 +154,12 @@ class HybridRetriever:
         vector_results = self.vector_retriever.retrieve(
             normalized_query,
             top_k=self.candidate_k,
+            allowed_sources=allowed_sources,
         )
         bm25_results = self.bm25_retriever.retrieve(
             normalized_query,
             top_k=self.candidate_k,
+            allowed_sources=allowed_sources,
         )
         return reciprocal_rank_fusion(
             vector_results,

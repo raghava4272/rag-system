@@ -406,8 +406,7 @@ comparison.
 - [x] Readiness failure when authentication is not configured
 
 The session ID is currently a correlation identity, not stored conversation
-memory. Document-level authorization is the next security boundary; until it
-exists, every authenticated user can search the same corpus.
+memory. Document-level authorization is added in Phase 6.
 
 ### Create a Local API Key
 
@@ -428,6 +427,46 @@ variable named `RAG_API_KEY`; it is not the same value as
 variable. An optional `X-Session-ID` header may contain an existing UUID; when
 omitted, the server generates one and returns it in both the JSON response and
 the `X-Session-ID` response header.
+
+## Phase 6: Document Authorization
+
+Authentication proves who sent a query. Authorization now determines which
+indexed sources that identity may retrieve. The API maps the authenticated
+server-side user ID to an exact set of source identifiers and passes that scope
+through semantic retrieval, BM25 retrieval, hybrid fusion, and reranking.
+
+### Scope
+
+- [x] Deny access when an authenticated user has no permission rule
+- [x] Exact source matching with no wildcard or prefix expansion
+- [x] Vector filtering inside the Chroma query
+- [x] BM25 filtering before result ordering and rank assignment
+- [x] One permission scope shared by hybrid retrieval and reranking
+- [x] Final pipeline guard before retrieved content reaches Groq
+- [x] Empty permission sets safely produce no retrieved context
+- [x] Generic `403` responses that do not reveal source names
+- [x] Readiness failure when permission configuration is missing or invalid
+
+### Configure Local Document Access
+
+Add a `RAG_DOCUMENT_PERMISSIONS` JSON object to `.env`. Its user IDs must match
+the IDs in `RAG_API_KEY_HASHES`, and every source string must exactly match the
+`source` metadata stored during indexing. With the documented `data/raw` index
+command, the two included papers can be granted to `local-user` like this:
+
+```dotenv
+RAG_DOCUMENT_PERMISSIONS={"local-user":["data/raw/papers/rag-lewis-2020.pdf","data/raw/papers/react-yao-2022.pdf"]}
+```
+
+An empty list is a valid explicit rule and gives that user access to no
+documents. A missing user rule returns `403`. Wildcards are intentionally not
+supported because exact rules are easier to audit and cannot silently expand
+when a new document is indexed.
+
+Permission checks happen before evidence is sent to the language model. Chroma
+receives an exact metadata filter, BM25 removes out-of-scope candidates before
+ranking, and the pipeline independently rejects any out-of-scope result as a
+last line of defense.
 
 ## Docker Compose Workflow
 
@@ -475,11 +514,11 @@ docker compose run --rm evaluate
 docker compose run --rm report
 ```
 
-Compose reads `GROQ_API_KEY`, `GROQ_MODEL`, and `RAG_API_KEY_HASHES` from the
-local `.env` file. It injects the authentication hashes only into the API and
-never adds raw keys or hashes to the image. Named volumes persist the Chroma
-index, downloaded model cache, and evaluation report across disposable
-containers.
+Compose reads `GROQ_API_KEY`, `GROQ_MODEL`, `RAG_API_KEY_HASHES`, and
+`RAG_DOCUMENT_PERMISSIONS` from the local `.env` file. It injects authentication
+hashes and document policy only into the API and never adds them to the image.
+Named volumes persist the Chroma index, downloaded model cache, and evaluation
+report across disposable containers.
 
 The Dockerfile selects `requirements-linux-amd64.lock` or
 `requirements-linux-arm64.lock` from BuildKit's target architecture. Compose

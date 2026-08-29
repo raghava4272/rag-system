@@ -64,6 +64,26 @@ class BM25RetrieverTests(unittest.TestCase):
 
         self.assertEqual(retriever.retrieve("retrieval", top_k=5), [])
 
+    def test_permission_scope_filters_documents_before_keyword_ranking(self) -> None:
+        results = self.retriever.retrieve(
+            "retrieval candidates relevance",
+            top_k=3,
+            allowed_sources=frozenset({"reranking.md"}),
+        )
+
+        self.assertEqual([result.id for result in results], ["chunk-reranking"])
+        self.assertEqual(results[0].rank, 1)
+
+    def test_empty_permission_scope_returns_no_keyword_results(self) -> None:
+        self.assertEqual(
+            self.retriever.retrieve(
+                "chromadb",
+                top_k=3,
+                allowed_sources=frozenset(),
+            ),
+            [],
+        )
+
     def test_blank_query_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "query"):
             self.retriever.retrieve("  \n", top_k=3)

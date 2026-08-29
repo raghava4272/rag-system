@@ -27,6 +27,7 @@ from src.embed import (
 )
 from src.generate import GeneratedAnswer
 from src.llm import DEFAULT_GROQ_MODEL, GroqLanguageModel
+from src.permissions import DocumentPermissions
 from src.pipeline import RAGPipeline
 from src.rerank import (
     DEFAULT_MIN_RELEVANCE_SCORE,
@@ -45,7 +46,13 @@ MAX_TOP_K = 20
 class AnswerPipeline(Protocol):
     """The small application interface required by the HTTP layer."""
 
-    def ask(self, question: str, *, top_k: int) -> GeneratedAnswer: ...
+    def ask(
+        self,
+        question: str,
+        *,
+        top_k: int,
+        allowed_sources: frozenset[str],
+    ) -> GeneratedAnswer: ...
 
 
 PipelineFactory = Callable[[], AnswerPipeline]
@@ -56,6 +63,13 @@ class Authenticator(Protocol):
 
 
 AuthenticatorFactory = Callable[[], Authenticator]
+
+
+class PermissionResolver(Protocol):
+    def allowed_sources(self, user_id: str) -> frozenset[str] | None: ...
+
+
+PermissionResolverFactory = Callable[[], PermissionResolver]
 
 
 class QueryRequest(BaseModel):
@@ -143,6 +157,20 @@ def build_default_authenticator() -> APIKeyAuthenticator:
     return APIKeyAuthenticator.from_environment()
 
 
+def build_default_document_permissions() -> DocumentPermissions:
+    """Load exact per-user document scopes from runtime configuration."""
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError(
+            "The API requires python-dotenv. Install the locked dependencies."
+        ) from error
+
+    load_dotenv(PROJECT_ROOT / ".env")
+    return DocumentPermissions.from_environment()
+
+
 def _safe_unavailable_response() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -167,6 +195,19 @@ def _unauthorized_response() -> JSONResponse:
             "error": {
                 "code": "unauthorized",
                 "message": "Valid bearer authentication is required.",
+            }
+        },
+    )
+
+
+def _forbidden_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        headers={"Cache-Control": "no-store"},
+        content={
+            "error": {
+                "code": "forbidden",
+                "message": "The authenticated user cannot access this resource.",
             }
         },
     )
@@ -202,6 +243,10 @@ def create_app(
     pipeline_factory: PipelineFactory = build_default_pipeline,
     authenticator: Authenticator | None = None,
     authenticator_factory: AuthenticatorFactory = build_default_authenticator,
+    document_permissions: PermissionResolver | None = None,
+    document_permissions_factory: PermissionResolverFactory = (
+        build_default_document_permissions
+    ),
 ) -> FastAPI:
     """Build an application with an injectable pipeline for deterministic tests."""
 
@@ -209,6 +254,7 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.pipeline = pipeline
         application.state.authenticator = authenticator
+        application.state.document_permissions = document_permissions
         if application.state.pipeline is None:
             try:
                 application.state.pipeline = await run_in_threadpool(
@@ -231,11 +277,22 @@ def create_app(
                     "API authentication initialization failed (type=%s)",
                     type(error).__name__,
                 )
+        if application.state.document_permissions is None:
+            try:
+                application.state.document_permissions = await run_in_threadpool(
+                    document_permissions_factory
+                )
+            except Exception as error:
+                application.state.document_permissions = None
+                LOGGER.error(
+                    "Document permission initialization failed (type=%s)",
+                    type(error).__name__,
+                )
         yield
 
     application = FastAPI(
         title="RAG System API",
-        version="5.0.0",
+        version="6.0.0",
         lifespan=lifespan,
         redoc_url=None,
     )
@@ -258,6 +315,7 @@ def create_app(
         if (
             request.app.state.pipeline is None
             or request.app.state.authenticator is None
+            or request.app.state.document_permissions is None
         ):
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -272,6 +330,7 @@ def create_app(
         response_model=QueryResponse,
         responses={
             status.HTTP_401_UNAUTHORIZED: {"model": ErrorResponse},
+            status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
             status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
         },
         tags=["rag"],
@@ -288,7 +347,12 @@ def create_app(
     ) -> QueryResponse | JSONResponse:
         resolved_pipeline = request.app.state.pipeline
         resolved_authenticator = request.app.state.authenticator
-        if resolved_pipeline is None or resolved_authenticator is None:
+        resolved_permissions = request.app.state.document_permissions
+        if (
+            resolved_pipeline is None
+            or resolved_authenticator is None
+            or resolved_permissions is None
+        ):
             return _safe_unavailable_response()
 
         user_id = None
@@ -297,12 +361,17 @@ def create_app(
         if user_id is None:
             return _unauthorized_response()
 
+        allowed_sources = resolved_permissions.allowed_sources(user_id)
+        if allowed_sources is None:
+            return _forbidden_response()
+
         resolved_session_id = requested_session_id or uuid4()
         try:
             answer = await run_in_threadpool(
                 resolved_pipeline.ask,
                 payload.question,
                 top_k=payload.top_k,
+                allowed_sources=allowed_sources,
             )
         except Exception as error:
             LOGGER.error(
